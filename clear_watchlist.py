@@ -10,6 +10,7 @@ import sys
 from dotenv import load_dotenv
 
 from config_store import init_config
+from plex_api import PlexApiClient
 from plex_watchlist import create_service_from_env
 
 load_dotenv()
@@ -60,21 +61,30 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _estimate_write_access(service, user) -> str:
+    if user.source in ("admin", "home"):
+        return "plexapi (read+write)"
+    token_lookup = service._client._build_user_token_lookup()
+    user_keys = PlexApiClient._name_lookup_keys(user.name, str(user.user_id))
+    if user_keys.intersection(token_lookup):
+        return "plexapi (read+write)"
+    return "read-only (add token to user_tokens.env)"
+
+
 def _list_users() -> int:
     service = create_service_from_env()
-    users = service.list_server_users()
+    users = service._client.discover_server_users(
+        service._get_machine_id(),
+        resolve_home_tokens_for=set(),
+        apply_friend_uuids=False,
+    )
     if not users:
         logger.error("No Plex users found on this server")
         return 1
 
     print(f"Found {len(users)} user(s):")
     for user in users:
-        if service._client.get_myplex_account(user) is not None:
-            access = "plexapi (read+write)"
-        elif user.uuid:
-            access = "graphql (read-only)"
-        else:
-            access = "no access"
+        access = _estimate_write_access(service, user)
         print(f"  - {user.name} (id={user.user_id}, {user.source}, {access})")
     return 0
 
@@ -112,46 +122,39 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("No Plex user matched '%s'. Run with --list-users.", args.user)
         return 1
 
-    if not args.dry_run and not args.yes:
-        try:
-            movies_count, shows_count = service.clear_user_watchlist(
-                args.user,
-                movies=movies,
-                shows=shows,
-                dry_run=True,
-            )
-        except (ValueError, RuntimeError) as exc:
-            logger.error("%s", exc)
-            return 1
-
-        total = movies_count + shows_count
-        print(
-            f"Would remove {total} item(s) from '{user.name}' "
-            f"({movies_count} movie(s), {shows_count} show(s))."
-        )
-        print("Re-run with --yes to delete, or --dry-run to preview in the logs.")
-        return 0
+    dry_run = args.dry_run or not args.yes
 
     try:
         movies_removed, shows_removed = service.clear_user_watchlist(
             args.user,
             movies=movies,
             shows=shows,
-            dry_run=args.dry_run,
+            dry_run=dry_run,
+            user=user,
         )
     except (ValueError, RuntimeError) as exc:
         logger.error("%s", exc)
         return 1
 
-    action = "Would remove" if args.dry_run else "Removed"
-    logger.info(
-        "%s %d item(s) from '%s' (%d movie(s), %d show(s))",
-        action,
-        movies_removed + shows_removed,
-        user.name,
-        movies_removed,
-        shows_removed,
-    )
+    total = movies_removed + shows_removed
+    if not args.dry_run and not args.yes:
+        print(
+            f"Would remove {total} item(s) from '{user.name}' "
+            f"({movies_removed} movie(s), {shows_removed} show(s))."
+        )
+        print("Re-run with --yes to delete, or --dry-run to preview in the logs.")
+        return 0
+
+    if args.yes or args.dry_run:
+        action = "Would remove" if dry_run else "Removed"
+        logger.info(
+            "%s %d item(s) from '%s' (%d movie(s), %d show(s))",
+            action,
+            total,
+            user.name,
+            movies_removed,
+            shows_removed,
+        )
     return 0
 
 
