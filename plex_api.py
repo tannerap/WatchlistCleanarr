@@ -71,6 +71,7 @@ class PlexApiClient:
         self.token = token
         self.timeout = timeout
         self.home_user_pin = home_user_pin
+        self._home_user_token_cache: dict[int, str] = {}
         self._session = requests.Session()
         self._session.headers.update(self._default_headers())
 
@@ -156,7 +157,7 @@ class PlexApiClient:
                 user_id=user_id,
                 name=name,
                 uuid=details.get("uuid"),
-                token=None,
+                token=shared_user.get("token"),
                 source="shared",
             )
 
@@ -224,50 +225,60 @@ class PlexApiClient:
         home_user_pin: str | None,
         name: str,
     ) -> str | None:
-        params: dict[str, str] = {}
-        if home_user_pin:
-            params["pin"] = home_user_pin
+        cached = self._home_user_token_cache.get(user_id)
+        if cached:
+            return cached
 
-        for attempt in range(HOME_USER_SWITCH_RETRIES):
-            try:
-                response = self._session.post(
-                    f"{PLEX_TV_BASE}/api/home/users/{user_id}/switch",
-                    params=params,
-                    headers={**self._default_headers(), "Accept": "application/xml"},
-                    timeout=self.timeout,
-                )
-                response.raise_for_status()
-                root = ET.fromstring(response.content)
-                token = root.attrib.get("authenticationToken")
-                if not token:
-                    for elem in root.iter("User"):
-                        token = elem.attrib.get("authenticationToken")
-                        if token:
-                            break
-                return token
-            except requests.HTTPError as exc:
-                status = exc.response.status_code if exc.response is not None else None
-                if status == 429 and attempt < HOME_USER_SWITCH_RETRIES - 1:
-                    delay = HOME_USER_SWITCH_RETRY_DELAY_SEC * (attempt + 1)
-                    logger.info(
-                        "Rate limited switching to Plex Home user '%s', retrying in %.0fs",
-                        name,
-                        delay,
+        pin_attempts: list[dict[str, str] | None] = [None]
+        if home_user_pin:
+            pin_attempts.append({"pin": home_user_pin})
+
+        for pin_params in pin_attempts:
+            for attempt in range(HOME_USER_SWITCH_RETRIES):
+                try:
+                    response = self._session.post(
+                        f"{PLEX_TV_BASE}/api/home/users/{user_id}/switch",
+                        params=pin_params or {},
+                        headers={**self._default_headers(), "Accept": "application/xml"},
+                        timeout=self.timeout,
                     )
-                    time.sleep(delay)
-                    continue
-                if status in (401, 403):
-                    logger.warning(
-                        "Plex Home user '%s' requires a PIN or cannot be switched. "
-                        "Set PLEX_HOME_USER_PIN if needed.",
-                        name,
-                    )
-                else:
+                    response.raise_for_status()
+                    root = ET.fromstring(response.content)
+                    token = root.attrib.get("authenticationToken")
+                    if not token:
+                        for elem in root.iter("User"):
+                            token = elem.attrib.get("authenticationToken")
+                            if token:
+                                break
+                    if token:
+                        self._home_user_token_cache[user_id] = token
+                    return token
+                except requests.HTTPError as exc:
+                    status = exc.response.status_code if exc.response is not None else None
+                    if status == 429 and attempt < HOME_USER_SWITCH_RETRIES - 1:
+                        delay = HOME_USER_SWITCH_RETRY_DELAY_SEC * (attempt + 1)
+                        logger.info(
+                            "Rate limited switching to Plex Home user '%s', retrying in %.0fs",
+                            name,
+                            delay,
+                        )
+                        time.sleep(delay)
+                        continue
+                    if status in (401, 403) and pin_params is None and home_user_pin:
+                        break
+                    if status in (401, 403):
+                        logger.warning(
+                            "Plex Home user '%s' is PIN-protected and could not be switched. "
+                            "Remove the profile PIN in Plex Home settings or set PLEX_HOME_USER_PIN "
+                            "to that profile's PIN.",
+                            name,
+                        )
+                    else:
+                        logger.warning("Could not switch to Plex Home user '%s': %s", name, exc)
+                    return None
+                except Exception as exc:
                     logger.warning("Could not switch to Plex Home user '%s': %s", name, exc)
-                return None
-            except Exception as exc:
-                logger.warning("Could not switch to Plex Home user '%s': %s", name, exc)
-                return None
+                    return None
         return None
 
     def _get_api_user_details(self) -> dict[int, dict[str, str]]:
@@ -308,6 +319,7 @@ class PlexApiClient:
                     {
                         "id": user_id,
                         "name": shared.attrib.get("username") or shared.attrib.get("title"),
+                        "token": shared.attrib.get("accessToken") or None,
                     }
                 )
         except Exception as exc:
@@ -617,13 +629,21 @@ class PlexApiClient:
     def remove_from_watchlist(self, user: ServerUser, item: WatchlistItem, libtype: str) -> bool:
         user = self.ensure_user_token(user)
         if user.source != "admin" and not user.token:
-            logger.warning(
-                "Cannot remove '%s' from %s's watchlist: no user-specific Plex token. "
-                "For Plex Home users, set PLEX_HOME_USER_PIN. "
-                "Shared users must be linked as Plex friends.",
-                item.title,
-                user.name,
-            )
+            if user.source == "home":
+                logger.warning(
+                    "Cannot remove '%s' from %s's watchlist: could not obtain a Plex Home "
+                    "user token with the admin account. PIN-protected profiles must either have "
+                    "their PIN removed in Plex or match PLEX_HOME_USER_PIN.",
+                    item.title,
+                    user.name,
+                )
+            else:
+                logger.warning(
+                    "Cannot remove '%s' from %s's watchlist: no Plex token for this shared user. "
+                    "Ensure they still have library access on this server.",
+                    item.title,
+                    user.name,
+                )
             return False
 
         token = user.token or self.token
