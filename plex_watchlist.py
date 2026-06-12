@@ -1,0 +1,197 @@
+"""Plex watchlist cleanup for all users on a media server."""
+
+from __future__ import annotations
+
+import logging
+import os
+
+import requests
+from plexapi.server import PlexServer
+
+from plex_api import PlexApiClient, ServerUser, WatchlistMovie
+
+logger = logging.getLogger(__name__)
+
+DELETE_EVENT_TYPES = {"MovieDelete", "MovieDeleted"}
+
+
+class PlexWatchlistService:
+    """Remove movies from every Plex user watchlist on the configured server."""
+
+    def __init__(self, plex_token: str, plex_url: str, home_user_pin: str | None = None) -> None:
+        self.plex_token = plex_token
+        self.plex_url = plex_url.rstrip("/")
+        self.home_user_pin = home_user_pin
+        self._client = PlexApiClient(plex_token, home_user_pin=home_user_pin)
+        self._machine_id: str | None = None
+
+    def verify_connection(self) -> None:
+        try:
+            PlexServer(self.plex_url, self.plex_token, timeout=10)
+            self._machine_id = self._client.get_machine_identifier(self.plex_url)
+            logger.info(
+                "Plex server reachable at %s (machineId=%s)",
+                self.plex_url,
+                self._machine_id,
+            )
+        except Exception as exc:
+            logger.warning("Could not reach Plex server at %s: %s", self.plex_url, exc)
+
+        try:
+            account = self._client.get_account()
+            logger.info(
+                "Plex account authenticated as %s",
+                account.get("title") or account.get("username"),
+            )
+            self._client.ping_token()
+        except Exception as exc:
+            logger.error("Plex account authentication failed: %s", exc)
+
+        try:
+            users = self._get_server_users()
+            logger.info("Found %d Plex user(s) with access to this server", len(users))
+            for user in users:
+                token_status = "token ok" if user.token else "no token"
+                logger.info("  - %s (%s, %s)", user.name, user.source, token_status)
+        except Exception as exc:
+            logger.error("Failed to enumerate Plex server users: %s", exc)
+
+    def _get_machine_id(self) -> str:
+        if self._machine_id is None:
+            self._machine_id = self._client.get_machine_identifier(self.plex_url)
+        return self._machine_id
+
+    def _get_server_users(self) -> list[ServerUser]:
+        return self._client.discover_server_users(self._get_machine_id())
+
+    def remove_movie_from_all_watchlists(
+        self,
+        *,
+        tmdb_id: int | None = None,
+        imdb_id: str | None = None,
+        title: str | None = None,
+    ) -> int:
+        if not tmdb_id and not imdb_id:
+            logger.warning(
+                "Skipping watchlist cleanup for '%s': no TMDB or IMDb ID in webhook payload",
+                title or "unknown movie",
+            )
+            return 0
+
+        removed_count = 0
+        for user in self._get_server_users():
+            try:
+                removed_count += self._remove_from_user_watchlist(
+                    user,
+                    tmdb_id=tmdb_id,
+                    imdb_id=imdb_id,
+                    title=title,
+                )
+            except Exception as exc:
+                logger.error(
+                    "Unexpected error while processing watchlist for '%s': %s",
+                    user.name,
+                    exc,
+                    exc_info=True,
+                )
+        return removed_count
+
+    def _remove_from_user_watchlist(
+        self,
+        user: ServerUser,
+        *,
+        tmdb_id: int | None,
+        imdb_id: str | None,
+        title: str | None,
+    ) -> int:
+        if not user.token:
+            logger.warning(
+                "Skipping user '%s' (%s): no usable Plex token",
+                user.name,
+                user.source,
+            )
+            return 0
+
+        try:
+            watchlist = self._client.fetch_watchlist_movies(user.token)
+        except requests.RequestException as exc:
+            logger.error("Failed to fetch watchlist for '%s': %s", user.name, exc)
+            return 0
+
+        matches = [
+            movie
+            for movie in watchlist
+            if _movie_matches(movie, tmdb_id=tmdb_id, imdb_id=imdb_id)
+        ]
+        if not matches:
+            logger.info(
+                "No watchlist match for '%s' (user: %s)",
+                title or "movie",
+                user.name,
+            )
+            return 0
+
+        removed = 0
+        for movie in matches:
+            try:
+                if self._client.remove_from_watchlist(user.token, movie.rating_key):
+                    removed += 1
+                    logger.info(
+                        "Removed '%s' from %s's watchlist",
+                        movie.title or title or "movie",
+                        user.name,
+                    )
+            except requests.RequestException as exc:
+                logger.error(
+                    "Network error removing '%s' from %s's watchlist: %s",
+                    movie.title or title or "movie",
+                    user.name,
+                    exc,
+                )
+        return removed
+
+
+def _movie_matches(
+    movie: WatchlistMovie,
+    *,
+    tmdb_id: int | None,
+    imdb_id: str | None,
+) -> bool:
+    guids = set(movie.guids)
+
+    if tmdb_id is not None:
+        tmdb_id_str = str(tmdb_id)
+        tmdb_variants = {
+            f"tmdb://{tmdb_id_str}",
+            f"themoviedb://{tmdb_id_str}",
+        }
+        if guids.intersection(tmdb_variants):
+            return True
+        if any(guid.endswith(f"/{tmdb_id_str}") for guid in guids):
+            return True
+
+    if imdb_id:
+        normalized = imdb_id if imdb_id.startswith("tt") else f"tt{imdb_id}"
+        imdb_variants = {
+            f"imdb://{normalized}",
+            f"imdb://{normalized.lstrip('tt')}",
+        }
+        if guids.intersection(imdb_variants):
+            return True
+
+    return False
+
+
+def create_service_from_env() -> PlexWatchlistService:
+    plex_token = os.environ.get("PLEX_TOKEN", "")
+    plex_url = os.environ.get("PLEX_URL", "http://localhost:32400")
+    home_user_pin = os.environ.get("PLEX_HOME_USER_PIN")
+
+    if not plex_token:
+        raise ValueError("PLEX_TOKEN environment variable is required")
+
+    return PlexWatchlistService(
+        plex_token=plex_token,
+        plex_url=plex_url,
+        home_user_pin=home_user_pin,
+    )

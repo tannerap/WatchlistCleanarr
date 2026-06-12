@@ -1,0 +1,20 @@
+services:
+  watchlist-cleanarr:
+    # Nach dem ersten Release:
+    # image: ghcr.io/tannerap/watchlistcleanarr:latest
+    build: .
+    container_name: watchlist-cleanarr
+    restart: unless-stopped
+    ports:
+      - "${WEBHOOK_PORT:-5000}:5000"
+    environment:
+      # Plex Media Server URL (vom Container aus erreichbar)
+      PLEX_URL: "http://host.docker.internal:32400"
+      # X-Plex-Token des Plex-Server-Administrators
+      PLEX_TOKEN: "your-plex-token-here"
+      # Optional: PIN für geschützte Plex-Home-Benutzer
+      PLEX_HOME_USER_PIN: ""
+      # Webhook-Port im Container (fest 5000)
+      WEBHOOK_PORT: "5000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
