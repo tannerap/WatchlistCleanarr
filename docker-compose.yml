@@ -1,10 +1,10 @@
 services:
   watchlist-cleanarr:
-    build: .
+    image: ghcr.io/tannerap/watchlistcleanarr:latest
     container_name: watchlist-cleanarr
     restart: unless-stopped
     ports:
-      - "${WEBHOOK_PORT:-8788}:8788"
+      - "${WEBHOOK_PORT:-8788}:${WEBHOOK_PORT:-8788}"
     volumes:
       - watchlist-cleanarr-data:/data
     environment:
@@ -17,7 +17,7 @@ services:
       CONFIG_DIR: "/data"
       WEBHOOK_PORT: "8788"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://127.0.0.1:8788/ping"]
+      test: ["CMD-SHELL", "curl -f http://127.0.0.1:$${WEBHOOK_PORT:-8788}/ping || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3

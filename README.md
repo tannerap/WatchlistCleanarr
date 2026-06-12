@@ -60,7 +60,7 @@ Or use `docker compose` (see below) — set environment variables on the first s
 | `PLEX_HOME_USER_PIN` | No | Optional fallback PIN for a **single** PIN-protected Plex Home profile (not one PIN per user) |
 | `WEBHOOK_API_KEY` | Recommended | API key to protect webhook endpoints |
 | `CONFIG_DIR` | No | Path for persistent config (default: `/data`) |
-| `WEBHOOK_PORT` | No | Host port for Docker mapping (default: `8788`) |
+| `WEBHOOK_PORT` | No | Port gunicorn listens on inside the container and the host mapping (default: `8788`) |
 
 ### Remove tokens from compose after the first start
 
@@ -83,11 +83,14 @@ docker compose up -d
 services:
   watchlist-cleanarr:
     image: ghcr.io/tannerap/watchlistcleanarr:latest
+    ports:
+      - "${WEBHOOK_PORT:-8788}:${WEBHOOK_PORT:-8788}"
     volumes:
       - watchlist-cleanarr-data:/data
     environment:
       PLEX_URL: "http://plex:32400"      # Plex container hostname
       PLEX_TOKEN: "your-token"           # first start only
+      WEBHOOK_PORT: "8788"
       CONFIG_DIR: "/data"
     networks:
       - media
@@ -132,6 +135,24 @@ docker compose logs -f watchlist-cleanarr
 curl http://localhost:8788/ping
 # {"status":"pong"}
 ```
+
+After startup, the logs must show the same port:
+
+```text
+WatchlistCleanarr starting gunicorn on 0.0.0.0:8788
+Listening at: http://0.0.0.0:8788
+```
+
+If you still see port `5000`, you are running an old image. Pull and recreate:
+
+```bash
+docker compose pull --ignore-buildable
+docker compose up -d --force-recreate
+```
+
+**Radarr/Sonarr webhook URL (same Docker network):** use the **container port**, not the host-mapped port from your browser. With the default config that is:
+
+`http://watchlist-cleanarr:8788/webhook/radarr?apikey=YOUR_KEY`
 
 The container self-checks via Docker healthcheck (`GET /ping` every 30 seconds). Check status:
 
