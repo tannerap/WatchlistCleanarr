@@ -12,6 +12,7 @@ services:
       PLEX_URL: "http://plex:32400"
       # Nur beim ERSTEN Start setzen – danach aus compose entfernen (wird nach /data/config.env geschrieben)
       PLEX_TOKEN: "your-plex-token-here"
+      WEBHOOK_API_KEY: "your-webhook-api-key-here"
       PLEX_HOME_USER_PIN: ""
       CONFIG_DIR: "/data"
       WEBHOOK_PORT: "5000"

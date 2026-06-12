@@ -8,7 +8,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-PERSISTED_KEYS = ("PLEX_URL", "PLEX_TOKEN", "PLEX_HOME_USER_PIN")
+PERSISTED_KEYS = ("PLEX_URL", "PLEX_TOKEN", "PLEX_HOME_USER_PIN", "WEBHOOK_API_KEY")
 
 
 def _config_file() -> Path:
@@ -30,7 +30,7 @@ def _parse_env_file(path: Path) -> dict[str, str]:
 def _write_env_file(path: Path, values: dict[str, str]) -> None:
     lines = [
         "# WatchlistCleanarr – persisted on first container start.",
-        "# You can remove PLEX_TOKEN from docker-compose.yml after this file exists.",
+        "# You can remove PLEX_TOKEN and WEBHOOK_API_KEY from docker-compose.yml after this file exists.",
         "",
     ]
     for key in PERSISTED_KEYS:

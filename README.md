@@ -58,12 +58,13 @@ Alternativ mit `docker compose` (siehe unten) — beim ersten Start nur die Umge
 | `PLEX_URL` | Ja | Plex-URL, z. B. `http://plex:32400` (Docker-DNS) |
 | `PLEX_TOKEN` | Ja* | X-Plex-Token des Administrators (*nur beim ersten Start in compose) |
 | `PLEX_HOME_USER_PIN` | Nein | PIN für geschützte Plex-Home-Benutzer |
+| `WEBHOOK_API_KEY` | Empfohlen | API-Key zum Schutz der Webhook-Endpunkte |
 | `CONFIG_DIR` | Nein | Pfad für persistente Config (Standard: `/data`) |
 | `WEBHOOK_PORT` | Nein | Externer Port (Standard: `5000`) |
 
 ### Token nach dem ersten Start aus compose entfernen
 
-Beim **ersten Start** mit `PLEX_TOKEN` in `docker-compose.yml` schreibt der Container die Werte nach `/data/config.env` (Volume). Danach kannst du `PLEX_TOKEN` aus der compose-Datei entfernen — bei Neustarts wird der Token aus dem Volume geladen.
+Beim **ersten Start** mit `PLEX_TOKEN` und `WEBHOOK_API_KEY` in `docker-compose.yml` schreibt der Container die Werte nach `/data/config.env` (Volume). Danach kannst du beide Secrets aus der compose-Datei entfernen — bei Neustarts werden sie aus dem Volume geladen.
 
 ```bash
 # Einmalig starten (Token in compose gesetzt)
@@ -132,15 +133,33 @@ curl http://localhost:5000/health
 # {"status":"ok"}
 ```
 
+## Webhook-Authentifizierung
+
+Wenn `WEBHOOK_API_KEY` gesetzt ist, müssen alle Webhook-Requests den Key mitsenden:
+
+| Methode | Beispiel |
+| --- | --- |
+| Query-Parameter (empfohlen für *arr) | `http://host:5000/webhook/radarr?apikey=DEIN_KEY` |
+| Header | `X-API-Key: DEIN_KEY` |
+| Bearer-Token | `Authorization: Bearer DEIN_KEY` |
+
 ## Radarr-Webhook einrichten
 
 1. Radarr → **Einstellungen** → **Connect** → **+** → **Webhook**
 2. **Name:** `WatchlistCleanarr`
-3. **URL:** `http://<host>:5000/webhook/radarr`
+3. **URL:** `http://<host>:5000/webhook/radarr?apikey=DEIN_KEY`
 4. **Trigger:** **On Delete** aktivieren
 5. Speichern
 
-**Docker-Netzwerk:** Laufen Radarr und WatchlistCleanarr im selben Compose-Netzwerk, kann die URL `http://watchlist-cleanarr:5000/webhook/radarr` lauten.
+## Sonarr-Webhook einrichten
+
+1. Sonarr → **Einstellungen** → **Connect** → **+** → **Webhook**
+2. **Name:** `WatchlistCleanarr`
+3. **URL:** `http://<host>:5000/webhook/sonarr?apikey=DEIN_KEY`
+4. **Trigger:** **On Series Delete** aktivieren
+5. Speichern
+
+**Docker-Netzwerk:** Laufen *arr und WatchlistCleanarr im selben Compose-Netzwerk, kann die URL `http://watchlist-cleanarr:5000/webhook/radarr?apikey=...` lauten.
 
 ## Unterstützte Nutzertypen
 
@@ -156,10 +175,16 @@ curl http://localhost:5000/health
 
 | Methode | Pfad | Beschreibung |
 | --- | --- | --- |
-| `GET` | `/health` | Health-Check |
-| `POST` | `/webhook/radarr` | Radarr-Webhook-Empfang |
+| `GET` | `/health` | Health-Check (ohne API-Key) |
+| `POST` | `/webhook/radarr` | Radarr-Webhook (Filme) |
+| `POST` | `/webhook/sonarr` | Sonarr-Webhook (Serien) |
 
-Unterstützte Events: `MovieDelete` (Standard) und `MovieDeleted` (Alias).
+Unterstützte Events:
+
+| Quelle | Events |
+| --- | --- |
+| Radarr | `MovieDelete`, `MovieDeleted` |
+| Sonarr | `SeriesDelete`, `SeriesDeleted` |
 
 ## CI/CD: Docker-Image bauen und veröffentlichen
 

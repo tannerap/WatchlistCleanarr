@@ -1,4 +1,4 @@
-"""Flask webhook service: Radarr movie deletion -> Plex watchlist cleanup."""
+"""Flask webhook service: Radarr/Sonarr deletion -> Plex watchlist cleanup."""
 
 from __future__ import annotations
 
@@ -9,8 +9,14 @@ import sys
 from dotenv import load_dotenv
 from flask import Flask, request
 
+from auth import get_expected_api_key, is_authorized
 from config_store import init_config
-from plex_watchlist import DELETE_EVENT_TYPES, PlexWatchlistService, create_service_from_env
+from plex_watchlist import (
+    RADARR_DELETE_EVENTS,
+    SONARR_DELETE_EVENTS,
+    PlexWatchlistService,
+    create_service_from_env,
+)
 
 load_dotenv()
 init_config()
@@ -33,6 +39,22 @@ def get_plex_service() -> PlexWatchlistService:
     return plex_service
 
 
+def _require_api_key() -> tuple[dict, int] | None:
+    if is_authorized(request):
+        return None
+    logger.warning("Rejected webhook request: invalid or missing API key")
+    return {"status": "unauthorized", "message": "Invalid or missing API key"}, 401
+
+
+def _parse_int(value) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 @app.route("/health", methods=["GET"])
 def health() -> tuple[dict, int]:
     return {"status": "ok"}, 200
@@ -40,28 +62,28 @@ def health() -> tuple[dict, int]:
 
 @app.route("/webhook/radarr", methods=["POST"])
 def radarr_webhook() -> tuple[dict, int]:
+    auth_error = _require_api_key()
+    if auth_error:
+        return auth_error
+
     payload = request.get_json(silent=True)
     if not payload:
-        logger.warning("Received webhook without JSON payload")
+        logger.warning("Received Radarr webhook without JSON payload")
         return {"status": "ignored", "reason": "invalid payload"}, 400
 
     event_type = payload.get("eventType", "")
     logger.info("Received Radarr webhook: eventType=%s", event_type)
 
-    if event_type not in DELETE_EVENT_TYPES:
+    if event_type not in RADARR_DELETE_EVENTS:
         return {"status": "ignored", "eventType": event_type}, 200
 
     movie = payload.get("movie") or {}
-    tmdb_id = movie.get("tmdbId")
+    tmdb_id = _parse_int(movie.get("tmdbId"))
     imdb_id = movie.get("imdbId")
     title = movie.get("title")
 
-    if tmdb_id is not None:
-        try:
-            tmdb_id = int(tmdb_id)
-        except (TypeError, ValueError):
-            logger.warning("Invalid tmdbId in payload: %s", tmdb_id)
-            tmdb_id = None
+    if movie.get("tmdbId") is not None and tmdb_id is None:
+        logger.warning("Invalid tmdbId in Radarr payload: %s", movie.get("tmdbId"))
 
     logger.info(
         "Processing movie deletion: title=%s tmdbId=%s imdbId=%s",
@@ -88,6 +110,61 @@ def radarr_webhook() -> tuple[dict, int]:
     }, 200
 
 
+@app.route("/webhook/sonarr", methods=["POST"])
+def sonarr_webhook() -> tuple[dict, int]:
+    auth_error = _require_api_key()
+    if auth_error:
+        return auth_error
+
+    payload = request.get_json(silent=True)
+    if not payload:
+        logger.warning("Received Sonarr webhook without JSON payload")
+        return {"status": "ignored", "reason": "invalid payload"}, 400
+
+    event_type = payload.get("eventType", "")
+    logger.info("Received Sonarr webhook: eventType=%s", event_type)
+
+    if event_type not in SONARR_DELETE_EVENTS:
+        return {"status": "ignored", "eventType": event_type}, 200
+
+    series = payload.get("series") or {}
+    tvdb_id = _parse_int(series.get("tvdbId"))
+    tmdb_id = _parse_int(series.get("tmdbId"))
+    imdb_id = series.get("imdbId")
+    title = series.get("title")
+
+    if series.get("tvdbId") is not None and tvdb_id is None:
+        logger.warning("Invalid tvdbId in Sonarr payload: %s", series.get("tvdbId"))
+    if series.get("tmdbId") is not None and tmdb_id is None:
+        logger.warning("Invalid tmdbId in Sonarr payload: %s", series.get("tmdbId"))
+
+    logger.info(
+        "Processing series deletion: title=%s tvdbId=%s tmdbId=%s imdbId=%s",
+        title,
+        tvdb_id,
+        tmdb_id,
+        imdb_id,
+    )
+
+    try:
+        removed_count = get_plex_service().remove_show_from_all_watchlists(
+            tvdb_id=tvdb_id,
+            tmdb_id=tmdb_id,
+            imdb_id=imdb_id,
+            title=title,
+        )
+    except Exception as exc:
+        logger.error("Watchlist cleanup failed: %s", exc, exc_info=True)
+        return {"status": "error", "message": str(exc)}, 500
+
+    return {
+        "status": "ok",
+        "eventType": event_type,
+        "title": title,
+        "removedFromWatchlists": removed_count,
+    }, 200
+
+
 def _startup_verification() -> None:
     if not os.environ.get("PLEX_TOKEN"):
         logger.error(
@@ -95,6 +172,14 @@ def _startup_verification() -> None:
             os.environ.get("CONFIG_DIR", "/data") + "/config.env",
         )
         return
+
+    if not get_expected_api_key():
+        logger.warning(
+            "WEBHOOK_API_KEY is not set. Webhook endpoints are not protected."
+        )
+    else:
+        logger.info("Webhook API key protection is enabled")
+
     try:
         get_plex_service().verify_connection()
     except Exception as exc:

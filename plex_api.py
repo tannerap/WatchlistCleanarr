@@ -50,10 +50,11 @@ class ServerUser:
 
 
 @dataclass(frozen=True)
-class WatchlistMovie:
+class WatchlistItem:
     rating_key: str
     title: str
     guids: tuple[str, ...]
+    item_type: str  # movie or show
 
 
 class PlexApiClient:
@@ -325,10 +326,10 @@ class PlexApiClient:
                     user.name,
                 )
 
-    def fetch_watchlist_movies(self, user: ServerUser) -> list[WatchlistMovie]:
+    def fetch_watchlist_items(self, user: ServerUser, libtype: str) -> list[WatchlistItem]:
         if user.uuid:
             try:
-                return self._fetch_watchlist_graphql(user.uuid)
+                return self._fetch_watchlist_graphql(user.uuid, libtype)
             except requests.RequestException as exc:
                 logger.warning(
                     "GraphQL watchlist fetch failed for '%s': %s",
@@ -338,7 +339,7 @@ class PlexApiClient:
 
         if user.token:
             try:
-                return self._fetch_watchlist_rest(user.token)
+                return self._fetch_watchlist_rest(user.token, libtype)
             except requests.RequestException as exc:
                 logger.warning(
                     "REST watchlist fetch failed for '%s': %s",
@@ -350,8 +351,8 @@ class PlexApiClient:
             f"No watchlist access for user '{user.name}' (missing uuid/token)"
         )
 
-    def _fetch_watchlist_graphql(self, user_uuid: str) -> list[WatchlistMovie]:
-        movies: list[WatchlistMovie] = []
+    def _fetch_watchlist_graphql(self, user_uuid: str, libtype: str) -> list[WatchlistItem]:
+        items: list[WatchlistItem] = []
         after: str | None = None
 
         while True:
@@ -379,15 +380,20 @@ class PlexApiClient:
                 raise requests.RequestException(f"No watchlist access for uuid {user_uuid}")
 
             for node in watchlist.get("nodes", []):
-                if node.get("type") != "movie":
+                if node.get("type") != libtype:
                     continue
                 rating_key = str(node.get("id", ""))
                 title = node.get("title", "unknown")
                 guids = [node["guid"]] if node.get("guid") else []
                 if not guids and rating_key:
                     guids = self._fetch_metadata_guids(rating_key, self.token)
-                movies.append(
-                    WatchlistMovie(rating_key=rating_key, title=title, guids=tuple(guids))
+                items.append(
+                    WatchlistItem(
+                        rating_key=rating_key,
+                        title=title,
+                        guids=tuple(guids),
+                        item_type=libtype,
+                    )
                 )
 
             page_info = watchlist.get("pageInfo", {})
@@ -396,10 +402,10 @@ class PlexApiClient:
             else:
                 break
 
-        return movies
+        return items
 
-    def _fetch_watchlist_rest(self, user_token: str) -> list[WatchlistMovie]:
-        movies: list[WatchlistMovie] = []
+    def _fetch_watchlist_rest(self, user_token: str, libtype: str) -> list[WatchlistItem]:
+        items: list[WatchlistItem] = []
         start = 0
         total = 1
 
@@ -424,18 +430,23 @@ class PlexApiClient:
             start += int(container.get("size", 0))
 
             for item in container.get("Metadata", []):
-                if item.get("type") != "movie":
+                if item.get("type") != libtype:
                     continue
                 rating_key = str(item.get("ratingKey", ""))
                 title = item.get("title", "unknown")
                 guids = self._extract_guids_from_item(item)
                 if not guids and rating_key:
                     guids = self._fetch_metadata_guids(rating_key, user_token)
-                movies.append(
-                    WatchlistMovie(rating_key=rating_key, title=title, guids=tuple(guids))
+                items.append(
+                    WatchlistItem(
+                        rating_key=rating_key,
+                        title=title,
+                        guids=tuple(guids),
+                        item_type=libtype,
+                    )
                 )
 
-        return movies
+        return items
 
     def _fetch_metadata_guids(self, rating_key: str, user_token: str) -> list[str]:
         try:
