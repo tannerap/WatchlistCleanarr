@@ -57,7 +57,7 @@ Or use `docker compose` (see below) — set environment variables on the first s
 | --- | --- | --- |
 | `PLEX_URL` | Yes | Plex URL, e.g. `http://plex:32400` (Docker DNS) |
 | `PLEX_TOKEN` | Yes* | Administrator X-Plex-Token (*first start in compose only) |
-| `PLEX_HOME_USER_PIN` | No | PIN for protected Plex Home users |
+| `PLEX_HOME_USER_PIN` | No* | PIN for protected Plex Home users (*required to remove items from managed home users' watchlists) |
 | `WEBHOOK_API_KEY` | Recommended | API key to protect webhook endpoints |
 | `CONFIG_DIR` | No | Path for persistent config (default: `/data`) |
 | `WEBHOOK_PORT` | No | External port (default: `5000`) |
