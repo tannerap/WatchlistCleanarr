@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-import uuid
+import uuid as uuid_lib
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from typing import Any
@@ -17,6 +17,25 @@ DISCOVER_BASE = "https://discover.provider.plex.tv"
 COMMUNITY_GRAPHQL = "https://community.plex.tv/api"
 WATCHLIST_PAGE_SIZE = 200
 CLIENT_IDENTIFIER = "watchlist-cleanarr"
+
+WATCHLIST_GRAPHQL = """
+query GetWatchlistHub($uuid: ID!, $first: PaginationInt!, $after: String) {
+  user(id: $uuid) {
+    watchlist(first: $first, after: $after) {
+      nodes {
+        id
+        title
+        type
+        guid
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+  }
+}
+"""
 
 
 @dataclass(frozen=True)
@@ -59,6 +78,16 @@ class PlexApiClient:
             "X-Plex-Version": "1.0.0",
         }
 
+    def _graphql_headers(self) -> dict[str, str]:
+        return {
+            "Accept": "*/*",
+            "Content-Type": "application/json",
+            "X-Plex-Token": self.token,
+            "X-Plex-Client-Identifier": CLIENT_IDENTIFIER,
+            "X-Plex-Product": "Plex Web",
+            "X-Plex-Version": "4.145.1",
+        }
+
     def get_account(self) -> dict[str, Any]:
         response = self._session.get(
             f"{PLEX_TV_BASE}/users/account.json",
@@ -78,6 +107,7 @@ class PlexApiClient:
 
     def discover_server_users(self, machine_id: str) -> list[ServerUser]:
         users: dict[int, ServerUser] = {}
+        admin_id: int | None = None
 
         try:
             account = self.get_account()
@@ -94,6 +124,8 @@ class PlexApiClient:
 
         for home_user in self._get_home_users(self.home_user_pin):
             user_id = home_user["id"]
+            if admin_id is not None and user_id == admin_id:
+                continue
             users[user_id] = ServerUser(
                 user_id=user_id,
                 name=home_user["name"],
@@ -105,25 +137,16 @@ class PlexApiClient:
         api_user_names = self._get_api_user_names()
         for shared_user in self._get_shared_server_users(machine_id):
             user_id = shared_user["id"]
+            if admin_id is not None and user_id == admin_id:
+                continue
             name = api_user_names.get(user_id) or shared_user.get("name") or str(user_id)
-            existing = users.get(user_id)
-            if existing:
-                if existing.token is None and shared_user.get("token"):
-                    users[user_id] = ServerUser(
-                        user_id=existing.user_id,
-                        name=existing.name or name,
-                        uuid=existing.uuid or shared_user.get("uuid"),
-                        token=shared_user["token"],
-                        source=existing.source,
-                    )
-            else:
-                users[user_id] = ServerUser(
-                    user_id=user_id,
-                    name=name,
-                    uuid=shared_user.get("uuid"),
-                    token=shared_user.get("token"),
-                    source="shared",
-                )
+            users[user_id] = ServerUser(
+                user_id=user_id,
+                name=name,
+                uuid=None,
+                token=None,
+                source="shared",
+            )
 
         self._apply_friend_uuids(users)
         return list(users.values())
@@ -150,13 +173,14 @@ class PlexApiClient:
                     or user_elem.attrib.get("username")
                     or str(user_id)
                 )
-                entry: dict[str, Any] = {
-                    "id": user_id,
-                    "name": name,
-                    "uuid": user_elem.attrib.get("uuid"),
-                    "token": self._switch_home_user_token(user_id, home_user_pin, name),
-                }
-                results.append(entry)
+                results.append(
+                    {
+                        "id": user_id,
+                        "name": name,
+                        "uuid": user_elem.attrib.get("uuid"),
+                        "token": self._switch_home_user_token(user_id, home_user_pin, name),
+                    }
+                )
         except Exception as exc:
             logger.error("Failed to list Plex Home users: %s", exc)
         return results
@@ -237,8 +261,6 @@ class PlexApiClient:
                     {
                         "id": user_id,
                         "name": shared.attrib.get("username") or shared.attrib.get("title"),
-                        "token": shared.attrib.get("accessToken"),
-                        "uuid": None,
                     }
                 )
         except Exception as exc:
@@ -250,10 +272,11 @@ class PlexApiClient:
         return users
 
     def _apply_friend_uuids(self, users: dict[int, ServerUser]) -> None:
-        friend_uuid_by_name: dict[str, str] = {}
+        uuid_by_name: dict[str, str] = {}
         try:
             response = self._session.post(
                 COMMUNITY_GRAPHQL,
+                headers=self._graphql_headers(),
                 json={
                     "query": """
                         query GetAllFriends {
@@ -261,6 +284,7 @@ class PlexApiClient:
                                 user {
                                     id
                                     username
+                                    displayName
                                 }
                             }
                         }
@@ -272,17 +296,19 @@ class PlexApiClient:
             payload = response.json()
             for entry in payload.get("data", {}).get("allFriendsV2", []):
                 user = entry.get("user", {})
-                username = user.get("username")
                 user_uuid = user.get("id")
-                if username and user_uuid:
-                    friend_uuid_by_name[username.lower()] = user_uuid
+                if not user_uuid:
+                    continue
+                for key in (user.get("username"), user.get("displayName")):
+                    if key:
+                        uuid_by_name[key.lower()] = user_uuid
         except Exception as exc:
             logger.warning("Could not load Plex friend UUIDs: %s", exc)
 
         for user_id, user in list(users.items()):
             if user.uuid:
                 continue
-            matched_uuid = friend_uuid_by_name.get(user.name.lower())
+            matched_uuid = uuid_by_name.get(user.name.lower())
             if matched_uuid:
                 users[user_id] = ServerUser(
                     user_id=user.user_id,
@@ -291,25 +317,104 @@ class PlexApiClient:
                     token=user.token,
                     source=user.source,
                 )
+            elif user.source == "shared":
+                logger.warning(
+                    "No Plex UUID for shared user '%s'. "
+                    "Ensure they are friends with the admin and watchlist visibility "
+                    "is set to 'Friends' or 'Anyone'.",
+                    user.name,
+                )
 
-    def fetch_watchlist_movies(self, user_token: str) -> list[WatchlistMovie]:
+    def fetch_watchlist_movies(self, user: ServerUser) -> list[WatchlistMovie]:
+        if user.uuid:
+            try:
+                return self._fetch_watchlist_graphql(user.uuid)
+            except requests.RequestException as exc:
+                logger.warning(
+                    "GraphQL watchlist fetch failed for '%s': %s",
+                    user.name,
+                    exc,
+                )
+
+        if user.token:
+            try:
+                return self._fetch_watchlist_rest(user.token)
+            except requests.RequestException as exc:
+                logger.warning(
+                    "REST watchlist fetch failed for '%s': %s",
+                    user.name,
+                    exc,
+                )
+
+        raise requests.RequestException(
+            f"No watchlist access for user '{user.name}' (missing uuid/token)"
+        )
+
+    def _fetch_watchlist_graphql(self, user_uuid: str) -> list[WatchlistMovie]:
+        movies: list[WatchlistMovie] = []
+        after: str | None = None
+
+        while True:
+            variables: dict[str, Any] = {
+                "uuid": user_uuid,
+                "first": WATCHLIST_PAGE_SIZE,
+            }
+            if after:
+                variables["after"] = after
+
+            response = self._session.post(
+                COMMUNITY_GRAPHQL,
+                headers=self._graphql_headers(),
+                json={"query": WATCHLIST_GRAPHQL, "variables": variables},
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            payload = response.json()
+
+            if payload.get("errors"):
+                raise requests.RequestException(str(payload["errors"]))
+
+            watchlist = payload.get("data", {}).get("user", {}).get("watchlist")
+            if watchlist is None:
+                raise requests.RequestException(f"No watchlist access for uuid {user_uuid}")
+
+            for node in watchlist.get("nodes", []):
+                if node.get("type") != "movie":
+                    continue
+                rating_key = str(node.get("id", ""))
+                title = node.get("title", "unknown")
+                guids = [node["guid"]] if node.get("guid") else []
+                if not guids and rating_key:
+                    guids = self._fetch_metadata_guids(rating_key, self.token)
+                movies.append(
+                    WatchlistMovie(rating_key=rating_key, title=title, guids=tuple(guids))
+                )
+
+            page_info = watchlist.get("pageInfo", {})
+            if page_info.get("hasNextPage") and page_info.get("endCursor"):
+                after = page_info["endCursor"]
+            else:
+                break
+
+        return movies
+
+    def _fetch_watchlist_rest(self, user_token: str) -> list[WatchlistMovie]:
         movies: list[WatchlistMovie] = []
         start = 0
         total = 1
-
-        headers = {
-            **self._default_headers(),
-            "X-Plex-Token": user_token,
-        }
 
         while start < total:
             response = self._session.get(
                 f"{DISCOVER_BASE}/library/sections/watchlist/all",
                 params={
+                    "X-Plex-Token": user_token,
                     "X-Plex-Container-Start": start,
                     "X-Plex-Container-Size": WATCHLIST_PAGE_SIZE,
                 },
-                headers=headers,
+                headers={
+                    "Accept": "application/json",
+                    "X-Plex-Client-Identifier": CLIENT_IDENTIFIER,
+                },
                 timeout=self.timeout,
             )
             response.raise_for_status()
@@ -321,35 +426,26 @@ class PlexApiClient:
             for item in container.get("Metadata", []):
                 if item.get("type") != "movie":
                     continue
-                movies.append(self._to_watchlist_movie(item, user_token, headers))
+                rating_key = str(item.get("ratingKey", ""))
+                title = item.get("title", "unknown")
+                guids = self._extract_guids_from_item(item)
+                if not guids and rating_key:
+                    guids = self._fetch_metadata_guids(rating_key, user_token)
+                movies.append(
+                    WatchlistMovie(rating_key=rating_key, title=title, guids=tuple(guids))
+                )
 
         return movies
 
-    def _to_watchlist_movie(
-        self,
-        item: dict[str, Any],
-        user_token: str,
-        headers: dict[str, str],
-    ) -> WatchlistMovie:
-        rating_key = str(item.get("ratingKey", ""))
-        title = item.get("title", "unknown")
-        guids = self._extract_guids_from_item(item)
-
-        if not guids and rating_key:
-            guids = self._fetch_metadata_guids(rating_key, user_token, headers)
-
-        return WatchlistMovie(rating_key=rating_key, title=title, guids=tuple(guids))
-
-    def _fetch_metadata_guids(
-        self,
-        rating_key: str,
-        user_token: str,
-        headers: dict[str, str],
-    ) -> list[str]:
+    def _fetch_metadata_guids(self, rating_key: str, user_token: str) -> list[str]:
         try:
             response = self._session.get(
                 f"{DISCOVER_BASE}/library/metadata/{rating_key}",
-                headers={**headers, "X-Plex-Token": user_token},
+                params={"X-Plex-Token": user_token},
+                headers={
+                    "Accept": "application/json",
+                    "X-Plex-Client-Identifier": CLIENT_IDENTIFIER,
+                },
                 timeout=self.timeout,
             )
             response.raise_for_status()
@@ -371,28 +467,42 @@ class PlexApiClient:
                 guids.append(guid_value)
         return guids
 
-    def remove_from_watchlist(self, user_token: str, rating_key: str) -> bool:
+    def remove_from_watchlist(self, user: ServerUser, rating_key: str) -> bool:
+        tokens: list[str] = []
+        if user.token:
+            tokens.append(user.token)
+        if self.token not in tokens:
+            tokens.append(self.token)
+
+        for token in tokens:
+            if self._remove_from_watchlist_rest(token, rating_key):
+                return True
+        return False
+
+    def _remove_from_watchlist_rest(self, user_token: str, rating_key: str) -> bool:
         response = self._session.put(
             f"{DISCOVER_BASE}/actions/removeFromWatchlist",
-            params={"ratingKey": rating_key},
-            headers={**self._default_headers(), "X-Plex-Token": user_token},
+            params={"ratingKey": rating_key, "X-Plex-Token": user_token},
+            headers={
+                "X-Plex-Client-Identifier": CLIENT_IDENTIFIER,
+                "Accept": "application/json",
+            },
             data={"ratingKey": rating_key},
             timeout=self.timeout,
         )
         if response.status_code == 200:
             return True
-        logger.warning(
-            "removeFromWatchlist failed for ratingKey=%s (status=%s): %s",
+        logger.debug(
+            "removeFromWatchlist failed for ratingKey=%s (status=%s)",
             rating_key,
             response.status_code,
-            response.text[:300],
         )
         return False
 
     def ping_token(self) -> None:
         response = self._session.get(
             f"{PLEX_TV_BASE}/api/v2/ping",
-            params={"X-Plex-Client-Identifier": str(uuid.uuid4())},
+            params={"X-Plex-Client-Identifier": str(uuid_lib.uuid4())},
             timeout=self.timeout,
         )
         response.raise_for_status()

@@ -146,9 +146,11 @@ curl http://localhost:5000/health
 
 | Nutzertyp | Erkennung | Watchlist-Zugriff |
 | --- | --- | --- |
-| Administrator | Plex-Account des Token-Inhabers | Admin-Token |
-| Plex-Home (lokal/verwaltet) | `/api/home/users` + User-Switch | Token via Admin-Switch |
-| Eigener Plex-Account mit Bibliotheksfreigabe | `/api/servers/{id}/shared_servers` | `accessToken` aus Freigabe |
+| Administrator | Plex-Account des Token-Inhabers | GraphQL (UUID) + Admin-Token |
+| Plex-Home (lokal/verwaltet) | `/api/home/users` + User-Switch | GraphQL oder REST mit Home-Token |
+| Eigener Plex-Account mit Bibliotheksfreigabe | `/api/servers/{id}/shared_servers` | GraphQL mit Admin-Token + Freund-UUID |
+
+> **Wichtig für geteilte Nutzer:** Sie müssen mit dem Admin befreundet sein, und die Watchlist-Sichtbarkeit muss auf **Friends** oder **Anyone** stehen (Plex → Einstellungen → Konto → Datenschutz).
 
 ## API-Endpunkte
 

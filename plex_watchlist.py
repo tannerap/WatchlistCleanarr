@@ -51,8 +51,8 @@ class PlexWatchlistService:
             users = self._get_server_users()
             logger.info("Found %d Plex user(s) with access to this server", len(users))
             for user in users:
-                token_status = "token ok" if user.token else "no token"
-                logger.info("  - %s (%s, %s)", user.name, user.source, token_status)
+                access = "uuid+graphql" if user.uuid else ("token" if user.token else "no access")
+                logger.info("  - %s (%s, %s)", user.name, user.source, access)
         except Exception as exc:
             logger.error("Failed to enumerate Plex server users: %s", exc)
 
@@ -104,16 +104,16 @@ class PlexWatchlistService:
         imdb_id: str | None,
         title: str | None,
     ) -> int:
-        if not user.token:
+        if not user.uuid and not user.token:
             logger.warning(
-                "Skipping user '%s' (%s): no usable Plex token",
+                "Skipping user '%s' (%s): no UUID or Plex.tv token for watchlist access",
                 user.name,
                 user.source,
             )
             return 0
 
         try:
-            watchlist = self._client.fetch_watchlist_movies(user.token)
+            watchlist = self._client.fetch_watchlist_movies(user)
         except requests.RequestException as exc:
             logger.error("Failed to fetch watchlist for '%s': %s", user.name, exc)
             return 0
@@ -134,7 +134,7 @@ class PlexWatchlistService:
         removed = 0
         for movie in matches:
             try:
-                if self._client.remove_from_watchlist(user.token, movie.rating_key):
+                if self._client.remove_from_watchlist(user, movie.rating_key):
                     removed += 1
                     logger.info(
                         "Removed '%s' from %s's watchlist",
