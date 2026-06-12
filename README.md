@@ -263,6 +263,8 @@ Can be triggered manually via **Actions → Docker Build and Publish → Run wor
 
 ## Reliability
 
+- Webhooks return **immediately** (`status: accepted`) and run Plex watchlist cleanup in the background so Radarr/Sonarr and tools like Maintainerr are not blocked by slow Plex API calls
+- Background results are logged (`removedFromWatchlists=…` or error details)
 - API and network errors are logged to the console
 - The container does **not** exit on errors
 - Missing user tokens or unreachable watchlists are skipped and logged

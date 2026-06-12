@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 from flask import Flask, request
 
 from auth import get_expected_api_key, is_authorized
+from background_tasks import submit_watchlist_cleanup
 from config_store import init_config
 from plex_watchlist import (
     RADARR_FILE_DELETE_EVENTS,
@@ -120,28 +121,26 @@ def radarr_webhook() -> tuple[dict, int]:
         else "movie deletion"
     )
     logger.info(
-        "Processing Radarr %s: title=%s tmdbId=%s imdbId=%s",
+        "Queuing Radarr %s for background cleanup: title=%s tmdbId=%s imdbId=%s",
         action,
         title,
         tmdb_id,
         imdb_id,
     )
 
-    try:
-        removed_count = get_plex_service().remove_movie_from_all_watchlists(
-            tmdb_id=tmdb_id,
-            imdb_id=imdb_id,
-            title=title,
-        )
-    except Exception as exc:
-        logger.error("Watchlist cleanup failed: %s", exc, exc_info=True)
-        return {"status": "error", "message": str(exc)}, 500
+    submit_watchlist_cleanup(
+        "radarr movie cleanup",
+        get_plex_service().remove_movie_from_all_watchlists,
+        tmdb_id=tmdb_id,
+        imdb_id=imdb_id,
+        title=title,
+    )
 
     return {
-        "status": "ok",
+        "status": "accepted",
         "eventType": event_type,
         "title": title,
-        "removedFromWatchlists": removed_count,
+        "message": "Watchlist cleanup queued",
     }, 200
 
 
@@ -194,7 +193,7 @@ def sonarr_webhook() -> tuple[dict, int]:
         else "series deletion"
     )
     logger.info(
-        "Processing %s: title=%s tvdbId=%s tmdbId=%s imdbId=%s",
+        "Queuing %s for background cleanup: title=%s tvdbId=%s tmdbId=%s imdbId=%s",
         action,
         title,
         tvdb_id,
@@ -202,22 +201,20 @@ def sonarr_webhook() -> tuple[dict, int]:
         imdb_id,
     )
 
-    try:
-        removed_count = get_plex_service().remove_show_from_all_watchlists(
-            tvdb_id=tvdb_id,
-            tmdb_id=tmdb_id,
-            imdb_id=imdb_id,
-            title=title,
-        )
-    except Exception as exc:
-        logger.error("Watchlist cleanup failed: %s", exc, exc_info=True)
-        return {"status": "error", "message": str(exc)}, 500
+    submit_watchlist_cleanup(
+        "sonarr show cleanup",
+        get_plex_service().remove_show_from_all_watchlists,
+        tvdb_id=tvdb_id,
+        tmdb_id=tmdb_id,
+        imdb_id=imdb_id,
+        title=title,
+    )
 
     return {
-        "status": "ok",
+        "status": "accepted",
         "eventType": event_type,
         "title": title,
-        "removedFromWatchlists": removed_count,
+        "message": "Watchlist cleanup queued",
     }, 200
 
 
