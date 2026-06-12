@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 import uuid as uuid_lib
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -18,6 +19,8 @@ COMMUNITY_GRAPHQL = "https://community.plex.tv/api"
 WATCHLIST_GRAPHQL_PAGE_SIZE = 100
 WATCHLIST_REST_PAGE_SIZE = 100
 CLIENT_IDENTIFIER = "watchlist-cleanarr"
+HOME_USER_SWITCH_RETRIES = 3
+HOME_USER_SWITCH_RETRY_DELAY_SEC = 2.0
 
 WATCHLIST_GRAPHQL = """
 query GetWatchlistHub($uuid: ID!, $first: PaginationInt!, $after: String) {
@@ -124,7 +127,8 @@ class PlexApiClient:
         except Exception as exc:
             logger.error("Failed to load Plex admin account: %s", exc)
 
-        for home_user in self._get_home_users(self.home_user_pin):
+        home_users = self._get_home_users()
+        for home_user in home_users:
             user_id = home_user["id"]
             if admin_id is not None and user_id == admin_id:
                 continue
@@ -132,7 +136,7 @@ class PlexApiClient:
                 user_id=user_id,
                 name=home_user["name"],
                 uuid=home_user.get("uuid"),
-                token=home_user.get("token"),
+                token=None,
                 source="home",
             )
 
@@ -151,15 +155,16 @@ class PlexApiClient:
             users[user_id] = ServerUser(
                 user_id=user_id,
                 name=name,
-                uuid=None,
+                uuid=details.get("uuid"),
                 token=None,
                 source="shared",
             )
 
         self._apply_friend_uuids(users, api_user_details)
+        self._resolve_home_user_tokens(users, home_users)
         return list(users.values())
 
-    def _get_home_users(self, home_user_pin: str | None = None) -> list[dict[str, Any]]:
+    def _get_home_users(self) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
         try:
             response = self._session.get(
@@ -186,12 +191,32 @@ class PlexApiClient:
                         "id": user_id,
                         "name": name,
                         "uuid": user_elem.attrib.get("uuid"),
-                        "token": self._switch_home_user_token(user_id, home_user_pin, name),
                     }
                 )
         except Exception as exc:
             logger.error("Failed to list Plex Home users: %s", exc)
         return results
+
+    def _resolve_home_user_tokens(
+        self,
+        users: dict[int, ServerUser],
+        home_users: list[dict[str, Any]],
+    ) -> None:
+        """Switch into managed home users only when GraphQL UUID access is unavailable."""
+        home_user_ids = {home_user["id"] for home_user in home_users}
+        for user_id in home_user_ids:
+            user = users.get(user_id)
+            if user is None or user.uuid or user.token:
+                continue
+            token = self._switch_home_user_token(user_id, self.home_user_pin, user.name)
+            if token:
+                users[user_id] = ServerUser(
+                    user_id=user.user_id,
+                    name=user.name,
+                    uuid=user.uuid,
+                    token=token,
+                    source=user.source,
+                )
 
     def _switch_home_user_token(
         self,
@@ -199,38 +224,51 @@ class PlexApiClient:
         home_user_pin: str | None,
         name: str,
     ) -> str | None:
-        try:
-            params: dict[str, str] = {}
-            if home_user_pin:
-                params["pin"] = home_user_pin
-            response = self._session.post(
-                f"{PLEX_TV_BASE}/api/home/users/{user_id}/switch",
-                params=params,
-                headers={**self._default_headers(), "Accept": "application/xml"},
-                timeout=self.timeout,
-            )
-            response.raise_for_status()
-            root = ET.fromstring(response.content)
-            token = root.attrib.get("authenticationToken")
-            if not token:
-                for elem in root.iter("User"):
-                    token = elem.attrib.get("authenticationToken")
-                    if token:
-                        break
-            return token
-        except requests.HTTPError as exc:
-            if exc.response is not None and exc.response.status_code in (401, 403):
-                logger.warning(
-                    "Plex Home user '%s' requires a PIN or cannot be switched. "
-                    "Set PLEX_HOME_USER_PIN if needed.",
-                    name,
+        params: dict[str, str] = {}
+        if home_user_pin:
+            params["pin"] = home_user_pin
+
+        for attempt in range(HOME_USER_SWITCH_RETRIES):
+            try:
+                response = self._session.post(
+                    f"{PLEX_TV_BASE}/api/home/users/{user_id}/switch",
+                    params=params,
+                    headers={**self._default_headers(), "Accept": "application/xml"},
+                    timeout=self.timeout,
                 )
-            else:
+                response.raise_for_status()
+                root = ET.fromstring(response.content)
+                token = root.attrib.get("authenticationToken")
+                if not token:
+                    for elem in root.iter("User"):
+                        token = elem.attrib.get("authenticationToken")
+                        if token:
+                            break
+                return token
+            except requests.HTTPError as exc:
+                status = exc.response.status_code if exc.response is not None else None
+                if status == 429 and attempt < HOME_USER_SWITCH_RETRIES - 1:
+                    delay = HOME_USER_SWITCH_RETRY_DELAY_SEC * (attempt + 1)
+                    logger.info(
+                        "Rate limited switching to Plex Home user '%s', retrying in %.0fs",
+                        name,
+                        delay,
+                    )
+                    time.sleep(delay)
+                    continue
+                if status in (401, 403):
+                    logger.warning(
+                        "Plex Home user '%s' requires a PIN or cannot be switched. "
+                        "Set PLEX_HOME_USER_PIN if needed.",
+                        name,
+                    )
+                else:
+                    logger.warning("Could not switch to Plex Home user '%s': %s", name, exc)
+                return None
+            except Exception as exc:
                 logger.warning("Could not switch to Plex Home user '%s': %s", name, exc)
-            return None
-        except Exception as exc:
-            logger.warning("Could not switch to Plex Home user '%s': %s", name, exc)
-            return None
+                return None
+        return None
 
     def _get_api_user_details(self) -> dict[int, dict[str, str]]:
         details: dict[int, dict[str, str]] = {}
@@ -247,6 +285,8 @@ class PlexApiClient:
                 details[user_id] = {
                     "title": user_elem.attrib.get("title", ""),
                     "username": user_elem.attrib.get("username", ""),
+                    "uuid": user_elem.attrib.get("uuid", ""),
+                    "email": user_elem.attrib.get("email", ""),
                 }
         except Exception as exc:
             logger.error("Failed to list Plex shared users: %s", exc)
@@ -277,6 +317,17 @@ class PlexApiClient:
                 exc,
             )
         return users
+
+    @staticmethod
+    def _name_lookup_keys(*names: str | None) -> set[str]:
+        keys: set[str] = set()
+        for name in names:
+            if not name:
+                continue
+            lowered = name.lower().strip()
+            keys.add(lowered)
+            keys.add(lowered.replace(".", "").replace("_", "").replace("-", ""))
+        return keys
 
     def _apply_friend_uuids(
         self,
@@ -310,21 +361,33 @@ class PlexApiClient:
                 user_uuid = user.get("id")
                 if not user_uuid:
                     continue
-                for key in (user.get("username"), user.get("displayName")):
-                    if key:
-                        uuid_by_name[key.lower()] = user_uuid
+                for key in self._name_lookup_keys(
+                    user.get("username"),
+                    user.get("displayName"),
+                ):
+                    uuid_by_name[key] = user_uuid
         except Exception as exc:
             logger.warning("Could not load Plex friend UUIDs: %s", exc)
 
         for user_id, user in list(users.items()):
-            if user.uuid:
-                continue
-            names_to_try = {user.name.lower()}
             details = api_user_details.get(user_id, {})
-            for key in ("title", "username"):
-                value = details.get(key, "")
-                if value:
-                    names_to_try.add(value.lower())
+            resolved_uuid = user.uuid or details.get("uuid") or None
+            if resolved_uuid:
+                users[user_id] = ServerUser(
+                    user_id=user.user_id,
+                    name=user.name,
+                    uuid=resolved_uuid,
+                    token=user.token,
+                    source=user.source,
+                )
+                continue
+
+            names_to_try = self._name_lookup_keys(
+                user.name,
+                details.get("title"),
+                details.get("username"),
+                details.get("email", "").split("@")[0] if details.get("email") else None,
+            )
 
             matched_uuid = None
             for name in names_to_try:
