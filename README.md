@@ -60,7 +60,7 @@ Or use `docker compose` (see below) — set environment variables on the first s
 | `PLEX_HOME_USER_PIN` | No | PIN for protected Plex Home users |
 | `WEBHOOK_API_KEY` | Recommended | API key to protect webhook endpoints |
 | `CONFIG_DIR` | No | Path for persistent config (default: `/data`) |
-| `WEBHOOK_PORT` | No | External port (default: `5000`) |
+| `WEBHOOK_PORT` | No | Host port for Docker mapping (default: `8788`) |
 
 ### Remove tokens from compose after the first start
 
@@ -129,7 +129,7 @@ docker compose logs -f watchlist-cleanarr
 ### Health Check
 
 ```bash
-curl http://localhost:5000/ping
+curl http://localhost:8788/ping
 # {"status":"pong"}
 ```
 
@@ -146,7 +146,7 @@ If `WEBHOOK_API_KEY` is set, all webhook requests must include the key:
 
 | Method | Example |
 | --- | --- |
-| Query parameter (recommended for *arr) | `http://host:5000/webhook/radarr?apikey=YOUR_KEY` |
+| Query parameter (recommended for *arr) | `http://host:8788/webhook/radarr?apikey=YOUR_KEY` |
 | Header | `X-API-Key: YOUR_KEY` |
 | Bearer token | `Authorization: Bearer YOUR_KEY` |
 
@@ -154,7 +154,7 @@ If `WEBHOOK_API_KEY` is set, all webhook requests must include the key:
 
 1. Radarr → **Settings** → **Connect** → **+** → **Webhook**
 2. **Name:** `WatchlistCleanarr`
-3. **URL:** `http://<host>:5000/webhook/radarr?apikey=YOUR_KEY`
+3. **URL:** `http://<host>:8788/webhook/radarr?apikey=YOUR_KEY`
 4. Enable **triggers**:
    - **On Delete** — when the movie is removed from Radarr entirely
    - **On Movie File Delete** — when you use **Unmonitor and Delete Files** (movie stays in Radarr, file is deleted)
@@ -166,7 +166,7 @@ If `WEBHOOK_API_KEY` is set, all webhook requests must include the key:
 
 1. Sonarr → **Settings** → **Connect** → **+** → **Webhook**
 2. **Name:** `WatchlistCleanarr`
-3. **URL:** `http://<host>:5000/webhook/sonarr?apikey=YOUR_KEY`
+3. **URL:** `http://<host>:8788/webhook/sonarr?apikey=YOUR_KEY`
 4. Enable **triggers**:
    - **On Series Delete** — when the series is removed from Sonarr entirely
    - **On Episode File Delete** — when you use **Unmonitor show + seasons, delete all episodes** (series stays in Sonarr, episodes are deleted)
@@ -174,7 +174,22 @@ If `WEBHOOK_API_KEY` is set, all webhook requests must include the key:
 
 > **Note:** `EpisodeFileDelete` events caused by upgrades are intentionally ignored. Enable **On Episode File Delete**, not **On Episode File Delete For Upgrade**.
 
-**Docker network:** If *arr and WatchlistCleanarr run in the same Compose network, the URL can be `http://watchlist-cleanarr:5000/webhook/radarr?apikey=...`.
+**Docker network:** If *arr and WatchlistCleanarr run in the same Compose network, the URL can be `http://watchlist-cleanarr:8788/webhook/radarr?apikey=...`.
+
+### Delete vs. file-delete webhooks
+
+| Action | Radarr event | Sonarr event | Required webhook trigger |
+| --- | --- | --- | --- |
+| Remove movie/show from *arr (with or without files) | `MovieDelete` | `SeriesDelete` | **On Delete** / **On Series Delete** |
+| Unmonitor and delete files, keep entry in *arr | `MovieFileDelete` | `EpisodeFileDelete` | **On Movie File Delete** / **On Episode File Delete** |
+
+Tools like **Maintainerr** use the second path for *unmonitor and delete* rules: they call the Radarr/Sonarr file-delete API, not the library-delete API. If only **On Delete** is enabled, WatchlistCleanarr will never see those actions.
+
+Check WatchlistCleanarr logs after an action:
+
+- `eventType=MovieDelete` / `SeriesDelete` → full library delete
+- `eventType=MovieFileDelete` / `EpisodeFileDelete` → unmonitor + delete files
+- `Ignoring unsupported ... eventType=...` → enable the matching file-delete trigger in Radarr/Sonarr
 
 ## Supported User Types
 

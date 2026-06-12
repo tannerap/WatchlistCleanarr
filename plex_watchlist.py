@@ -14,12 +14,22 @@ from plex_api import PlexApiClient, ServerUser, WatchlistItem
 
 logger = logging.getLogger(__name__)
 
-RADARR_DELETE_EVENTS = {"MovieDelete", "MovieDeleted"}
-RADARR_FILE_DELETE_EVENTS = {"MovieFileDelete", "MovieFileDeleted"}
+RADARR_DELETE_EVENTS = {"MovieDelete", "MovieDeleted", "movieDelete", "movieDeleted"}
+RADARR_FILE_DELETE_EVENTS = {
+    "MovieFileDelete",
+    "MovieFileDeleted",
+    "movieFileDelete",
+    "movieFileDeleted",
+}
 RADARR_WATCHLIST_CLEANUP_EVENTS = RADARR_DELETE_EVENTS | RADARR_FILE_DELETE_EVENTS
 RADARR_FILE_DELETE_SKIP_REASONS = {"upgrade"}
-SONARR_DELETE_EVENTS = {"SeriesDelete", "SeriesDeleted"}
-SONARR_FILE_DELETE_EVENTS = {"EpisodeFileDelete", "EpisodeFileDeleted"}
+SONARR_DELETE_EVENTS = {"SeriesDelete", "SeriesDeleted", "seriesDelete", "seriesDeleted"}
+SONARR_FILE_DELETE_EVENTS = {
+    "EpisodeFileDelete",
+    "EpisodeFileDeleted",
+    "episodeFileDelete",
+    "episodeFileDeleted",
+}
 SONARR_WATCHLIST_CLEANUP_EVENTS = SONARR_DELETE_EVENTS | SONARR_FILE_DELETE_EVENTS
 SONARR_FILE_DELETE_SKIP_REASONS = {"upgrade"}
 SERVER_USERS_CACHE_TTL_SEC = 24 * 60 * 60

@@ -21,6 +21,15 @@ from plex_watchlist import (
     PlexWatchlistService,
     create_service_from_env,
 )
+from webhook_payload import (
+    extract_radarr_movie,
+    extract_sonarr_series,
+    get_delete_reason,
+    get_field,
+    is_known_event,
+    normalize_event_type,
+    should_skip_file_delete,
+)
 
 load_dotenv()
 init_config()
@@ -76,31 +85,43 @@ def radarr_webhook() -> tuple[dict, int]:
         logger.warning("Received Radarr webhook without JSON payload")
         return {"status": "ignored", "reason": "invalid payload"}, 400
 
-    event_type = payload.get("eventType", "")
+    event_type = normalize_event_type(payload.get("eventType"))
     logger.info("Received Radarr webhook: eventType=%s", event_type)
 
-    if event_type not in RADARR_WATCHLIST_CLEANUP_EVENTS:
+    if not is_known_event(event_type, RADARR_WATCHLIST_CLEANUP_EVENTS):
+        logger.info(
+            "Ignoring unsupported Radarr webhook eventType=%s "
+            "(enable On Delete and On Movie File Delete in Radarr)",
+            event_type,
+        )
         return {"status": "ignored", "eventType": event_type}, 200
 
-    if event_type in RADARR_FILE_DELETE_EVENTS:
-        delete_reason = str(payload.get("deleteReason", "")).lower()
-        if delete_reason in RADARR_FILE_DELETE_SKIP_REASONS:
+    if is_known_event(event_type, RADARR_FILE_DELETE_EVENTS):
+        delete_reason = get_delete_reason(payload)
+        logger.info("Radarr movie file delete webhook: deleteReason=%s", delete_reason or "unknown")
+        if should_skip_file_delete(delete_reason, RADARR_FILE_DELETE_SKIP_REASONS):
             logger.info(
-                "Ignoring Radarr movie file delete (reason=%s): not a manual removal",
-                payload.get("deleteReason"),
+                "Ignoring Radarr movie file delete (reason=%s): upgrade cleanup skipped",
+                delete_reason,
             )
             return {"status": "ignored", "eventType": event_type, "reason": delete_reason}, 200
 
-    movie = payload.get("movie") or {}
-    tmdb_id = _parse_int(movie.get("tmdbId"))
-    imdb_id = movie.get("imdbId")
-    title = movie.get("title")
+    movie = extract_radarr_movie(payload)
+    tmdb_id = _parse_int(get_field(movie, "tmdbId", "TmdbId"))
+    imdb_id = get_field(movie, "imdbId", "ImdbId")
+    title = get_field(movie, "title", "Title")
 
-    if movie.get("tmdbId") is not None and tmdb_id is None:
-        logger.warning("Invalid tmdbId in Radarr payload: %s", movie.get("tmdbId"))
+    if get_field(movie, "tmdbId", "TmdbId") is not None and tmdb_id is None:
+        logger.warning("Invalid tmdbId in Radarr payload: %s", get_field(movie, "tmdbId", "TmdbId"))
 
+    action = (
+        "movie file deletion"
+        if is_known_event(event_type, RADARR_FILE_DELETE_EVENTS)
+        else "movie deletion"
+    )
     logger.info(
-        "Processing movie deletion: title=%s tmdbId=%s imdbId=%s",
+        "Processing Radarr %s: title=%s tmdbId=%s imdbId=%s",
+        action,
         title,
         tmdb_id,
         imdb_id,
@@ -135,35 +156,41 @@ def sonarr_webhook() -> tuple[dict, int]:
         logger.warning("Received Sonarr webhook without JSON payload")
         return {"status": "ignored", "reason": "invalid payload"}, 400
 
-    event_type = payload.get("eventType", "")
+    event_type = normalize_event_type(payload.get("eventType"))
     logger.info("Received Sonarr webhook: eventType=%s", event_type)
 
-    if event_type not in SONARR_WATCHLIST_CLEANUP_EVENTS:
+    if not is_known_event(event_type, SONARR_WATCHLIST_CLEANUP_EVENTS):
+        logger.info(
+            "Ignoring unsupported Sonarr webhook eventType=%s "
+            "(enable On Series Delete and On Episode File Delete in Sonarr)",
+            event_type,
+        )
         return {"status": "ignored", "eventType": event_type}, 200
 
-    if event_type in SONARR_FILE_DELETE_EVENTS:
-        delete_reason = str(payload.get("deleteReason", "")).lower()
-        if delete_reason in SONARR_FILE_DELETE_SKIP_REASONS:
+    if is_known_event(event_type, SONARR_FILE_DELETE_EVENTS):
+        delete_reason = get_delete_reason(payload)
+        logger.info("Sonarr episode file delete webhook: deleteReason=%s", delete_reason or "unknown")
+        if should_skip_file_delete(delete_reason, SONARR_FILE_DELETE_SKIP_REASONS):
             logger.info(
-                "Ignoring Sonarr episode file delete (reason=%s): not a manual removal",
-                payload.get("deleteReason"),
+                "Ignoring Sonarr episode file delete (reason=%s): upgrade cleanup skipped",
+                delete_reason,
             )
             return {"status": "ignored", "eventType": event_type, "reason": delete_reason}, 200
 
-    series = payload.get("series") or {}
-    tvdb_id = _parse_int(series.get("tvdbId"))
-    tmdb_id = _parse_int(series.get("tmdbId"))
-    imdb_id = series.get("imdbId")
-    title = series.get("title")
+    series = extract_sonarr_series(payload)
+    tvdb_id = _parse_int(get_field(series, "tvdbId", "TvdbId"))
+    tmdb_id = _parse_int(get_field(series, "tmdbId", "TmdbId"))
+    imdb_id = get_field(series, "imdbId", "ImdbId")
+    title = get_field(series, "title", "Title")
 
-    if series.get("tvdbId") is not None and tvdb_id is None:
-        logger.warning("Invalid tvdbId in Sonarr payload: %s", series.get("tvdbId"))
-    if series.get("tmdbId") is not None and tmdb_id is None:
-        logger.warning("Invalid tmdbId in Sonarr payload: %s", series.get("tmdbId"))
+    if get_field(series, "tvdbId", "TvdbId") is not None and tvdb_id is None:
+        logger.warning("Invalid tvdbId in Sonarr payload: %s", get_field(series, "tvdbId", "TvdbId"))
+    if get_field(series, "tmdbId", "TmdbId") is not None and tmdb_id is None:
+        logger.warning("Invalid tmdbId in Sonarr payload: %s", get_field(series, "tmdbId", "TmdbId"))
 
     action = (
         "episode file deletion"
-        if event_type in SONARR_FILE_DELETE_EVENTS
+        if is_known_event(event_type, SONARR_FILE_DELETE_EVENTS)
         else "series deletion"
     )
     logger.info(

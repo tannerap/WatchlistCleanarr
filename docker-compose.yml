@@ -4,7 +4,7 @@ services:
     container_name: watchlist-cleanarr
     restart: unless-stopped
     ports:
-      - "${WEBHOOK_PORT:-5000}:5000"
+      - "${WEBHOOK_PORT:-8788}:8788"
     volumes:
       - watchlist-cleanarr-data:/data
     environment:
@@ -15,9 +15,9 @@ services:
       WEBHOOK_API_KEY: "your-webhook-api-key-here"
       PLEX_HOME_USER_PIN: ""
       CONFIG_DIR: "/data"
-      WEBHOOK_PORT: "5000"
+      WEBHOOK_PORT: "8788"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://127.0.0.1:5000/ping"]
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8788/ping"]
       interval: 30s
       timeout: 5s
       retries: 3

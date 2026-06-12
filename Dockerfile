@@ -11,13 +11,13 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && pip install --no-cache-dir -r requirements.txt
 
-COPY app.py auth.py config_store.py plex_api.py plex_watchlist.py ./
+COPY app.py auth.py config_store.py plex_api.py plex_watchlist.py webhook_payload.py ./
 
 RUN mkdir -p /data && chmod 700 /data
 
-EXPOSE 5000
+EXPOSE 8788
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD curl -f http://127.0.0.1:5000/ping || exit 1
+    CMD curl -f http://127.0.0.1:8788/ping || exit 1
 
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "1", "--threads", "2", "--timeout", "120", "app:app"]
+CMD ["gunicorn", "--bind", "0.0.0.0:8788", "--workers", "1", "--threads", "2", "--timeout", "120", "app:app"]
