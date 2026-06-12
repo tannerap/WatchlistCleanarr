@@ -53,34 +53,53 @@ Alternativ mit `docker compose` (siehe unten) — beim ersten Start nur die Umge
 
 ## Konfiguration
 
-Alle Einstellungen werden über Umgebungsvariablen gesetzt. Beim ersten Deployment trägst du sie in `docker-compose.yml` im `environment`-Block ein:
-
 | Variable | Pflicht | Beschreibung |
 | --- | --- | --- |
-| `PLEX_URL` | Ja | URL des Plex-Servers, z. B. `http://192.168.1.10:32400` |
-| `PLEX_TOKEN` | Ja | X-Plex-Token des Server-Administrators |
+| `PLEX_URL` | Ja | Plex-URL, z. B. `http://plex:32400` (Docker-DNS) |
+| `PLEX_TOKEN` | Ja* | X-Plex-Token des Administrators (*nur beim ersten Start in compose) |
 | `PLEX_HOME_USER_PIN` | Nein | PIN für geschützte Plex-Home-Benutzer |
+| `CONFIG_DIR` | Nein | Pfad für persistente Config (Standard: `/data`) |
 | `WEBHOOK_PORT` | Nein | Externer Port (Standard: `5000`) |
 
-### Beispiel `docker-compose.yml`
+### Token nach dem ersten Start aus compose entfernen
+
+Beim **ersten Start** mit `PLEX_TOKEN` in `docker-compose.yml` schreibt der Container die Werte nach `/data/config.env` (Volume). Danach kannst du `PLEX_TOKEN` aus der compose-Datei entfernen — bei Neustarts wird der Token aus dem Volume geladen.
+
+```bash
+# Einmalig starten (Token in compose gesetzt)
+docker compose up -d
+
+# Prüfen, ob config geschrieben wurde
+docker compose exec watchlist-cleanarr cat /data/config.env
+
+# PLEX_TOKEN aus docker-compose.yml entfernen, neu starten
+docker compose up -d
+```
+
+### Beispiel `docker-compose.yml` (Plex im Docker-Netzwerk)
 
 ```yaml
 services:
   watchlist-cleanarr:
     image: ghcr.io/tannerap/watchlistcleanarr:latest
-    container_name: watchlist-cleanarr
-    restart: unless-stopped
-    ports:
-      - "5000:5000"
+    volumes:
+      - watchlist-cleanarr-data:/data
     environment:
-      PLEX_URL: "http://192.168.1.10:32400"
-      PLEX_TOKEN: "dein-plex-token"
-      PLEX_HOME_USER_PIN: ""
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      PLEX_URL: "http://plex:32400"      # Hostname des Plex-Containers
+      PLEX_TOKEN: "dein-token"           # nur beim ersten Start
+      CONFIG_DIR: "/data"
+    networks:
+      - media
+
+volumes:
+  watchlist-cleanarr-data:
+
+networks:
+  media:
+    external: true   # gleiches Netzwerk wie Plex/Radarr
 ```
 
-> **Hinweis:** Wenn Plex auf dem Docker-Host läuft, verwende `http://host.docker.internal:32400` oder die LAN-IP des Hosts. Der Container muss den Plex-Server erreichen können.
+> **Docker-DNS:** `PLEX_URL` muss vom Container aus erreichbar sein — typisch `http://<plex-service-name>:32400` im gemeinsamen Docker-Netzwerk, nicht `localhost`.
 
 Für lokale Entwicklung ohne Docker: `.env`-Datei anlegen (siehe `.env.example`).
 

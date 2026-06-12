@@ -68,13 +68,10 @@ class PlexApiClient:
         return response.json()["user"]
 
     def get_machine_identifier(self, plex_url: str) -> str:
-        response = self._session.get(
-            plex_url.rstrip("/"),
-            timeout=self.timeout,
-        )
-        response.raise_for_status()
-        root = ET.fromstring(response.content)
-        machine_id = root.attrib.get("machineIdentifier")
+        from plexapi.server import PlexServer
+
+        server = PlexServer(plex_url.rstrip("/"), self.token, timeout=self.timeout)
+        machine_id = server.machineIdentifier
         if not machine_id:
             raise ValueError("Plex server response did not include machineIdentifier")
         return machine_id

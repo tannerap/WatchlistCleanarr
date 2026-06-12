@@ -9,9 +9,11 @@ import sys
 from dotenv import load_dotenv
 from flask import Flask, request
 
+from config_store import init_config
 from plex_watchlist import DELETE_EVENT_TYPES, PlexWatchlistService, create_service_from_env
 
 load_dotenv()
+init_config()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -88,7 +90,10 @@ def radarr_webhook() -> tuple[dict, int]:
 
 def _startup_verification() -> None:
     if not os.environ.get("PLEX_TOKEN"):
-        logger.error("PLEX_TOKEN is not set. Configure it in docker-compose.yml.")
+        logger.error(
+            "PLEX_TOKEN is not set. Provide it once in docker-compose.yml or set it in %s.",
+            os.environ.get("CONFIG_DIR", "/data") + "/config.env",
+        )
         return
     try:
         get_plex_service().verify_connection()
