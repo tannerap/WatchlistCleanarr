@@ -71,6 +71,7 @@ class PlexApiClient:
         self.token = token
         self.timeout = timeout
         self.home_user_pin = home_user_pin
+        self._home_user_token_cache: dict[int, str] = {}
         self._session = requests.Session()
         self._session.headers.update(self._default_headers())
 
@@ -156,7 +157,7 @@ class PlexApiClient:
                 user_id=user_id,
                 name=name,
                 uuid=details.get("uuid"),
-                token=None,
+                token=shared_user.get("token"),
                 source="shared",
             )
 
@@ -224,50 +225,60 @@ class PlexApiClient:
         home_user_pin: str | None,
         name: str,
     ) -> str | None:
-        params: dict[str, str] = {}
-        if home_user_pin:
-            params["pin"] = home_user_pin
+        cached = self._home_user_token_cache.get(user_id)
+        if cached:
+            return cached
 
-        for attempt in range(HOME_USER_SWITCH_RETRIES):
-            try:
-                response = self._session.post(
-                    f"{PLEX_TV_BASE}/api/home/users/{user_id}/switch",
-                    params=params,
-                    headers={**self._default_headers(), "Accept": "application/xml"},
-                    timeout=self.timeout,
-                )
-                response.raise_for_status()
-                root = ET.fromstring(response.content)
-                token = root.attrib.get("authenticationToken")
-                if not token:
-                    for elem in root.iter("User"):
-                        token = elem.attrib.get("authenticationToken")
-                        if token:
-                            break
-                return token
-            except requests.HTTPError as exc:
-                status = exc.response.status_code if exc.response is not None else None
-                if status == 429 and attempt < HOME_USER_SWITCH_RETRIES - 1:
-                    delay = HOME_USER_SWITCH_RETRY_DELAY_SEC * (attempt + 1)
-                    logger.info(
-                        "Rate limited switching to Plex Home user '%s', retrying in %.0fs",
-                        name,
-                        delay,
+        pin_attempts: list[dict[str, str] | None] = [None]
+        if home_user_pin:
+            pin_attempts.append({"pin": home_user_pin})
+
+        for pin_params in pin_attempts:
+            for attempt in range(HOME_USER_SWITCH_RETRIES):
+                try:
+                    response = self._session.post(
+                        f"{PLEX_TV_BASE}/api/home/users/{user_id}/switch",
+                        params=pin_params or {},
+                        headers={**self._default_headers(), "Accept": "application/xml"},
+                        timeout=self.timeout,
                     )
-                    time.sleep(delay)
-                    continue
-                if status in (401, 403):
-                    logger.warning(
-                        "Plex Home user '%s' requires a PIN or cannot be switched. "
-                        "Set PLEX_HOME_USER_PIN if needed.",
-                        name,
-                    )
-                else:
+                    response.raise_for_status()
+                    root = ET.fromstring(response.content)
+                    token = root.attrib.get("authenticationToken")
+                    if not token:
+                        for elem in root.iter("User"):
+                            token = elem.attrib.get("authenticationToken")
+                            if token:
+                                break
+                    if token:
+                        self._home_user_token_cache[user_id] = token
+                    return token
+                except requests.HTTPError as exc:
+                    status = exc.response.status_code if exc.response is not None else None
+                    if status == 429 and attempt < HOME_USER_SWITCH_RETRIES - 1:
+                        delay = HOME_USER_SWITCH_RETRY_DELAY_SEC * (attempt + 1)
+                        logger.info(
+                            "Rate limited switching to Plex Home user '%s', retrying in %.0fs",
+                            name,
+                            delay,
+                        )
+                        time.sleep(delay)
+                        continue
+                    if status in (401, 403) and pin_params is None and home_user_pin:
+                        break
+                    if status in (401, 403):
+                        logger.warning(
+                            "Plex Home user '%s' is PIN-protected and could not be switched. "
+                            "Remove the profile PIN in Plex Home settings or set PLEX_HOME_USER_PIN "
+                            "to that profile's PIN.",
+                            name,
+                        )
+                    else:
+                        logger.warning("Could not switch to Plex Home user '%s': %s", name, exc)
+                    return None
+                except Exception as exc:
                     logger.warning("Could not switch to Plex Home user '%s': %s", name, exc)
-                return None
-            except Exception as exc:
-                logger.warning("Could not switch to Plex Home user '%s': %s", name, exc)
-                return None
+                    return None
         return None
 
     def _get_api_user_details(self) -> dict[int, dict[str, str]]:
@@ -308,6 +319,7 @@ class PlexApiClient:
                     {
                         "id": user_id,
                         "name": shared.attrib.get("username") or shared.attrib.get("title"),
+                        "token": shared.attrib.get("accessToken") or None,
                     }
                 )
         except Exception as exc:
@@ -576,17 +588,119 @@ class PlexApiClient:
                 guids.append(guid_value)
         return guids
 
-    def remove_from_watchlist(self, user: ServerUser, rating_key: str) -> bool:
-        tokens: list[str] = []
+    def ensure_user_token(self, user: ServerUser) -> ServerUser:
+        """Obtain a user-specific Plex.tv token for watchlist writes."""
         if user.token:
-            tokens.append(user.token)
-        if self.token not in tokens:
-            tokens.append(self.token)
+            return user
+        if user.source == "admin":
+            return ServerUser(
+                user_id=user.user_id,
+                name=user.name,
+                uuid=user.uuid,
+                token=self.token,
+                source=user.source,
+            )
+        if user.source == "home":
+            token = self._switch_home_user_token(user.user_id, self.home_user_pin, user.name)
+            if token:
+                return ServerUser(
+                    user_id=user.user_id,
+                    name=user.name,
+                    uuid=user.uuid,
+                    token=token,
+                    source=user.source,
+                )
+        return user
 
-        for token in tokens:
-            if self._remove_from_watchlist_rest(token, rating_key):
+    @staticmethod
+    def _rating_keys_for_removal(item: WatchlistItem) -> list[str]:
+        """Rating keys accepted by discover.provider.plex.tv removeFromWatchlist."""
+        keys: list[str] = []
+        if item.rating_key:
+            keys.append(item.rating_key)
+        for guid in item.guids:
+            if "/" not in guid:
+                continue
+            suffix = guid.rsplit("/", 1)[-1]
+            if suffix and suffix not in keys:
+                keys.append(suffix)
+        return keys
+
+    def remove_from_watchlist(self, user: ServerUser, item: WatchlistItem, libtype: str) -> bool:
+        user = self.ensure_user_token(user)
+        if user.source != "admin" and not user.token:
+            if user.source == "home":
+                logger.warning(
+                    "Cannot remove '%s' from %s's watchlist: could not obtain a Plex Home "
+                    "user token with the admin account. PIN-protected profiles must either have "
+                    "their PIN removed in Plex or match PLEX_HOME_USER_PIN.",
+                    item.title,
+                    user.name,
+                )
+            else:
+                logger.warning(
+                    "Cannot remove '%s' from %s's watchlist: no Plex token for this shared user. "
+                    "Ensure they still have library access on this server.",
+                    item.title,
+                    user.name,
+                )
+            return False
+
+        token = user.token or self.token
+        rating_keys = self._rating_keys_for_removal(item)
+        if not rating_keys:
+            logger.warning(
+                "Cannot remove '%s' from %s's watchlist: no rating key available",
+                item.title,
+                user.name,
+            )
+            return False
+
+        for rating_key in rating_keys:
+            if not self._remove_from_watchlist_rest(token, rating_key):
+                continue
+            if self._verify_removed_from_watchlist(user, item, libtype):
                 return True
+            logger.debug(
+                "removeFromWatchlist returned 200 but '%s' is still on %s's watchlist "
+                "(ratingKey=%s)",
+                item.title,
+                user.name,
+                rating_key,
+            )
+
+        logger.warning(
+            "Failed to remove '%s' from %s's watchlist (tried %d rating key(s))",
+            item.title,
+            user.name,
+            len(rating_keys),
+        )
         return False
+
+    def _verify_removed_from_watchlist(
+        self,
+        user: ServerUser,
+        item: WatchlistItem,
+        libtype: str,
+    ) -> bool:
+        try:
+            remaining = self.fetch_watchlist_items(user, libtype)
+        except requests.RequestException as exc:
+            logger.debug(
+                "Could not verify watchlist removal for '%s': %s",
+                user.name,
+                exc,
+            )
+            return False
+
+        removed_keys = set(self._rating_keys_for_removal(item))
+        removed_guids = set(item.guids)
+        for remaining_item in remaining:
+            if removed_keys.intersection(self._rating_keys_for_removal(remaining_item)):
+                return False
+            if removed_guids.intersection(remaining_item.guids):
+                return False
+        return True
 
     def _remove_from_watchlist_rest(self, user_token: str, rating_key: str) -> bool:
         response = self._session.put(

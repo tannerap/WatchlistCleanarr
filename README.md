@@ -57,7 +57,7 @@ Or use `docker compose` (see below) — set environment variables on the first s
 | --- | --- | --- |
 | `PLEX_URL` | Yes | Plex URL, e.g. `http://plex:32400` (Docker DNS) |
 | `PLEX_TOKEN` | Yes* | Administrator X-Plex-Token (*first start in compose only) |
-| `PLEX_HOME_USER_PIN` | No | PIN for protected Plex Home users |
+| `PLEX_HOME_USER_PIN` | No | Optional fallback PIN for a **single** PIN-protected Plex Home profile (not one PIN per user) |
 | `WEBHOOK_API_KEY` | Recommended | API key to protect webhook endpoints |
 | `CONFIG_DIR` | No | Path for persistent config (default: `/data`) |
 | `WEBHOOK_PORT` | No | Host port for Docker mapping (default: `8788`) |
@@ -193,12 +193,14 @@ Check WatchlistCleanarr logs after an action:
 
 ## Supported User Types
 
-| User type | Discovery | Watchlist access |
-| --- | --- | --- |
-| Administrator | Plex account of the token owner | GraphQL (UUID) + admin token |
-| Plex Home (local/managed) | `/api/home/users` + user switch | GraphQL or REST with Home token |
-| Own Plex account with library share | `/api/servers/{id}/shared_servers` | GraphQL with admin token + friend UUID |
+| User type | Discovery | Read watchlist | Remove from watchlist |
+| --- | --- | --- | --- |
+| Administrator | Plex account of the token owner | GraphQL + admin token | Admin token |
+| Plex Home (managed profile) | `/api/home/users` | GraphQL with admin token + UUID | Auto home-user switch with admin token (no PIN if profile is open) |
+| Own Plex account with library share | `/api/servers/{id}/shared_servers` | GraphQL with admin token + friend UUID | Shared user's `accessToken` from Plex (derived via admin token) |
 
+> **One `PLEX_TOKEN` is enough** for all server users. You do not configure a separate token or PIN per user. `PLEX_HOME_USER_PIN` is only needed when a specific Plex Home profile has its own PIN and you want WatchlistCleanarr to switch into that profile automatically.
+>
 > **Important for shared users:** They must be friends with the admin, and watchlist visibility must be set to **Friends** or **Anyone** (Plex → Settings → Account → Privacy).
 
 ## API Endpoints

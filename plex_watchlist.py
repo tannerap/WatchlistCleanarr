@@ -72,7 +72,14 @@ class PlexWatchlistService:
             users = self._refresh_server_users()
             logger.info("Found %d Plex user(s) with access to this server", len(users))
             for user in users:
-                access = "uuid+graphql" if user.uuid else ("token" if user.token else "no access")
+                if user.source == "admin":
+                    access = "admin (read+write)"
+                elif user.token:
+                    access = "token (read+write)"
+                elif user.uuid:
+                    access = "uuid (read-only; needs token for removal)"
+                else:
+                    access = "no access"
                 logger.info("  - %s (%s, %s)", user.name, user.source, access)
         except Exception as exc:
             logger.error("Failed to enumerate Plex server users: %s", exc)
@@ -215,10 +222,16 @@ class PlexWatchlistService:
         removed = 0
         for item in matches:
             try:
-                if self._client.remove_from_watchlist(user, item.rating_key):
+                if self._client.remove_from_watchlist(user, item, libtype):
                     removed += 1
                     logger.info(
                         "Removed '%s' from %s's watchlist",
+                        item.title or title,
+                        user.name,
+                    )
+                else:
+                    logger.warning(
+                        "Could not remove '%s' from %s's watchlist",
                         item.title or title,
                         user.name,
                     )
