@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 RADARR_DELETE_EVENTS = {"MovieDelete", "MovieDeleted"}
 SONARR_DELETE_EVENTS = {"SeriesDelete", "SeriesDeleted"}
-SERVER_USERS_CACHE_TTL_SEC = 300
+SERVER_USERS_CACHE_TTL_SEC = 24 * 60 * 60
 
 
 class PlexWatchlistService:
@@ -53,7 +53,7 @@ class PlexWatchlistService:
             logger.error("Plex account authentication failed: %s", exc)
 
         try:
-            users = self._get_server_users()
+            users = self._refresh_server_users()
             logger.info("Found %d Plex user(s) with access to this server", len(users))
             for user in users:
                 access = "uuid+graphql" if user.uuid else ("token" if user.token else "no access")
@@ -66,16 +66,26 @@ class PlexWatchlistService:
             self._machine_id = self._client.get_machine_identifier(self.plex_url)
         return self._machine_id
 
+    def _refresh_server_users(self) -> list[ServerUser]:
+        logger.info("Discovering Plex server users")
+        users = self._client.discover_server_users(self._get_machine_id())
+        self._server_users_cache = (time.monotonic(), users)
+        return users
+
     def _get_server_users(self) -> list[ServerUser]:
         now = time.monotonic()
         if self._server_users_cache is not None:
             cached_at, cached_users = self._server_users_cache
-            if now - cached_at < SERVER_USERS_CACHE_TTL_SEC:
+            age_sec = now - cached_at
+            if age_sec < SERVER_USERS_CACHE_TTL_SEC:
+                logger.debug(
+                    "Using cached Plex server users (%d user(s), age %.0fs)",
+                    len(cached_users),
+                    age_sec,
+                )
                 return cached_users
 
-        users = self._client.discover_server_users(self._get_machine_id())
-        self._server_users_cache = (now, users)
-        return users
+        return self._refresh_server_users()
 
     def remove_movie_from_all_watchlists(
         self,
