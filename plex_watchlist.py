@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 
 import requests
 from plexapi.server import PlexServer
@@ -15,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 RADARR_DELETE_EVENTS = {"MovieDelete", "MovieDeleted"}
 SONARR_DELETE_EVENTS = {"SeriesDelete", "SeriesDeleted"}
+SERVER_USERS_CACHE_TTL_SEC = 300
 
 
 class PlexWatchlistService:
@@ -26,6 +28,7 @@ class PlexWatchlistService:
         self.home_user_pin = home_user_pin
         self._client = PlexApiClient(plex_token, home_user_pin=home_user_pin)
         self._machine_id: str | None = None
+        self._server_users_cache: tuple[float, list[ServerUser]] | None = None
 
     def verify_connection(self) -> None:
         try:
@@ -64,7 +67,15 @@ class PlexWatchlistService:
         return self._machine_id
 
     def _get_server_users(self) -> list[ServerUser]:
-        return self._client.discover_server_users(self._get_machine_id())
+        now = time.monotonic()
+        if self._server_users_cache is not None:
+            cached_at, cached_users = self._server_users_cache
+            if now - cached_at < SERVER_USERS_CACHE_TTL_SEC:
+                return cached_users
+
+        users = self._client.discover_server_users(self._get_machine_id())
+        self._server_users_cache = (now, users)
+        return users
 
     def remove_movie_from_all_watchlists(
         self,
@@ -217,6 +228,17 @@ def _log_no_match(user_name: str, title: str, watchlist: list[WatchlistItem]) ->
     )
 
 
+def _guid_matches_id(guids: set[str], variants: set[str]) -> bool:
+    """Match only exact external-ID GUIDs, never substrings inside Plex GUIDs."""
+    if guids.intersection(variants):
+        return True
+    for guid in guids:
+        for variant in variants:
+            if guid == variant or guid.endswith(f"/{variant.split('://', 1)[-1]}"):
+                return True
+    return False
+
+
 def _item_matches(
     item: WatchlistItem,
     *,
@@ -229,29 +251,26 @@ def _item_matches(
 
     if tvdb_id is not None:
         tvdb_id_str = str(tvdb_id)
-        tvdb_variants = {f"tvdb://{tvdb_id_str}", f"thetvdb://{tvdb_id_str}"}
-        if guids.intersection(tvdb_variants):
-            return True
-        if any(tvdb_id_str in guid for guid in guids):
+        if _guid_matches_id(
+            guids,
+            {f"tvdb://{tvdb_id_str}", f"thetvdb://{tvdb_id_str}"},
+        ):
             return True
 
     if tmdb_id is not None:
         tmdb_id_str = str(tmdb_id)
-        tmdb_variants = {f"tmdb://{tmdb_id_str}", f"themoviedb://{tmdb_id_str}"}
-        if guids.intersection(tmdb_variants):
-            return True
-        if any(tmdb_id_str in guid for guid in guids):
+        if _guid_matches_id(
+            guids,
+            {f"tmdb://{tmdb_id_str}", f"themoviedb://{tmdb_id_str}"},
+        ):
             return True
 
     if imdb_id:
         normalized = imdb_id if imdb_id.startswith("tt") else f"tt{imdb_id}"
-        imdb_variants = {
-            f"imdb://{normalized}",
-            f"imdb://{normalized.lstrip('tt')}",
-        }
-        if guids.intersection(imdb_variants):
-            return True
-        if any(normalized in guid for guid in guids):
+        if _guid_matches_id(
+            guids,
+            {f"imdb://{normalized}", f"imdb://{normalized.lstrip('tt')}"},
+        ):
             return True
 
     if title and item.title:
