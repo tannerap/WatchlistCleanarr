@@ -8,15 +8,16 @@ import os
 import requests
 from plexapi.server import PlexServer
 
-from plex_api import PlexApiClient, ServerUser, WatchlistMovie
+from plex_api import PlexApiClient, ServerUser, WatchlistItem
 
 logger = logging.getLogger(__name__)
 
-DELETE_EVENT_TYPES = {"MovieDelete", "MovieDeleted"}
+RADARR_DELETE_EVENTS = {"MovieDelete", "MovieDeleted"}
+SONARR_DELETE_EVENTS = {"SeriesDelete", "SeriesDeleted"}
 
 
 class PlexWatchlistService:
-    """Remove movies from every Plex user watchlist on the configured server."""
+    """Remove movies and shows from every Plex user watchlist on the configured server."""
 
     def __init__(self, plex_token: str, plex_url: str, home_user_pin: str | None = None) -> None:
         self.plex_token = plex_token
@@ -51,8 +52,8 @@ class PlexWatchlistService:
             users = self._get_server_users()
             logger.info("Found %d Plex user(s) with access to this server", len(users))
             for user in users:
-                token_status = "token ok" if user.token else "no token"
-                logger.info("  - %s (%s, %s)", user.name, user.source, token_status)
+                access = "uuid+graphql" if user.uuid else ("token" if user.token else "no access")
+                logger.info("  - %s (%s, %s)", user.name, user.source, access)
         except Exception as exc:
             logger.error("Failed to enumerate Plex server users: %s", exc)
 
@@ -78,11 +79,52 @@ class PlexWatchlistService:
             )
             return 0
 
+        return self._remove_from_all_watchlists(
+            libtype="movie",
+            title=title or "movie",
+            tmdb_id=tmdb_id,
+            imdb_id=imdb_id,
+        )
+
+    def remove_show_from_all_watchlists(
+        self,
+        *,
+        tvdb_id: int | None = None,
+        tmdb_id: int | None = None,
+        imdb_id: str | None = None,
+        title: str | None = None,
+    ) -> int:
+        if not tvdb_id and not tmdb_id and not imdb_id:
+            logger.warning(
+                "Skipping watchlist cleanup for '%s': no TVDB, TMDB or IMDb ID in webhook payload",
+                title or "unknown series",
+            )
+            return 0
+
+        return self._remove_from_all_watchlists(
+            libtype="show",
+            title=title or "series",
+            tvdb_id=tvdb_id,
+            tmdb_id=tmdb_id,
+            imdb_id=imdb_id,
+        )
+
+    def _remove_from_all_watchlists(
+        self,
+        *,
+        libtype: str,
+        title: str,
+        tvdb_id: int | None = None,
+        tmdb_id: int | None = None,
+        imdb_id: str | None = None,
+    ) -> int:
         removed_count = 0
         for user in self._get_server_users():
             try:
                 removed_count += self._remove_from_user_watchlist(
                     user,
+                    libtype=libtype,
+                    tvdb_id=tvdb_id,
                     tmdb_id=tmdb_id,
                     imdb_id=imdb_id,
                     title=title,
@@ -100,71 +142,84 @@ class PlexWatchlistService:
         self,
         user: ServerUser,
         *,
+        libtype: str,
+        tvdb_id: int | None,
         tmdb_id: int | None,
         imdb_id: str | None,
-        title: str | None,
+        title: str,
     ) -> int:
-        if not user.token:
+        if not user.uuid and not user.token:
             logger.warning(
-                "Skipping user '%s' (%s): no usable Plex token",
+                "Skipping user '%s' (%s): no UUID or Plex.tv token for watchlist access",
                 user.name,
                 user.source,
             )
             return 0
 
         try:
-            watchlist = self._client.fetch_watchlist_movies(user.token)
+            watchlist = self._client.fetch_watchlist_items(user, libtype)
         except requests.RequestException as exc:
             logger.error("Failed to fetch watchlist for '%s': %s", user.name, exc)
             return 0
 
         matches = [
-            movie
-            for movie in watchlist
-            if _movie_matches(movie, tmdb_id=tmdb_id, imdb_id=imdb_id)
+            item
+            for item in watchlist
+            if _item_matches(
+                item,
+                tvdb_id=tvdb_id,
+                tmdb_id=tmdb_id,
+                imdb_id=imdb_id,
+            )
         ]
         if not matches:
             logger.info(
                 "No watchlist match for '%s' (user: %s)",
-                title or "movie",
+                title,
                 user.name,
             )
             return 0
 
         removed = 0
-        for movie in matches:
+        for item in matches:
             try:
-                if self._client.remove_from_watchlist(user.token, movie.rating_key):
+                if self._client.remove_from_watchlist(user, item.rating_key):
                     removed += 1
                     logger.info(
                         "Removed '%s' from %s's watchlist",
-                        movie.title or title or "movie",
+                        item.title or title,
                         user.name,
                     )
             except requests.RequestException as exc:
                 logger.error(
                     "Network error removing '%s' from %s's watchlist: %s",
-                    movie.title or title or "movie",
+                    item.title or title,
                     user.name,
                     exc,
                 )
         return removed
 
 
-def _movie_matches(
-    movie: WatchlistMovie,
+def _item_matches(
+    item: WatchlistItem,
     *,
-    tmdb_id: int | None,
-    imdb_id: str | None,
+    tvdb_id: int | None = None,
+    tmdb_id: int | None = None,
+    imdb_id: str | None = None,
 ) -> bool:
-    guids = set(movie.guids)
+    guids = set(item.guids)
+
+    if tvdb_id is not None:
+        tvdb_id_str = str(tvdb_id)
+        tvdb_variants = {f"tvdb://{tvdb_id_str}", f"thetvdb://{tvdb_id_str}"}
+        if guids.intersection(tvdb_variants):
+            return True
+        if any(guid.endswith(f"/{tvdb_id_str}") for guid in guids):
+            return True
 
     if tmdb_id is not None:
         tmdb_id_str = str(tmdb_id)
-        tmdb_variants = {
-            f"tmdb://{tmdb_id_str}",
-            f"themoviedb://{tmdb_id_str}",
-        }
+        tmdb_variants = {f"tmdb://{tmdb_id_str}", f"themoviedb://{tmdb_id_str}"}
         if guids.intersection(tmdb_variants):
             return True
         if any(guid.endswith(f"/{tmdb_id_str}") for guid in guids):

@@ -8,7 +8,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app.py config_store.py plex_api.py plex_watchlist.py ./
+COPY app.py auth.py config_store.py plex_api.py plex_watchlist.py ./
 
 RUN mkdir -p /data && chmod 700 /data
 
