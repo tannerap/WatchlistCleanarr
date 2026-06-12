@@ -405,13 +405,12 @@ class PlexApiClient:
                 raise requests.RequestException(f"No watchlist access for uuid {user_uuid}")
 
             for node in watchlist.get("nodes", []):
-                if node.get("type") != libtype:
+                node_type = (node.get("type") or "").lower()
+                if node_type != libtype.lower():
                     continue
                 rating_key = str(node.get("id", ""))
                 title = node.get("title", "unknown")
-                guids = [node["guid"]] if node.get("guid") else []
-                if not guids and rating_key:
-                    guids = self._fetch_metadata_guids(rating_key, self.token)
+                guids = self._resolve_item_guids(rating_key, node.get("guid"))
                 items.append(
                     WatchlistItem(
                         rating_key=rating_key,
@@ -456,13 +455,14 @@ class PlexApiClient:
             start += int(container.get("size", 0))
 
             for item in container.get("Metadata", []):
-                if item.get("type") != libtype:
+                item_type = (item.get("type") or "").lower()
+                if item_type != libtype.lower():
                     continue
                 rating_key = str(item.get("ratingKey", ""))
                 title = item.get("title", "unknown")
                 guids = self._extract_guids_from_item(item)
-                if not guids and rating_key:
-                    guids = self._fetch_metadata_guids(rating_key, user_token)
+                if rating_key:
+                    guids = list(dict.fromkeys(guids + self._fetch_metadata_guids(rating_key, user_token)))
                 items.append(
                     WatchlistItem(
                         rating_key=rating_key,
@@ -473,6 +473,14 @@ class PlexApiClient:
                 )
 
         return items
+
+    def _resolve_item_guids(self, rating_key: str, node_guid: str | None) -> list[str]:
+        guids: list[str] = []
+        if node_guid:
+            guids.append(node_guid)
+        if rating_key:
+            guids.extend(self._fetch_metadata_guids(rating_key, self.token))
+        return list(dict.fromkeys(guids))
 
     def _fetch_metadata_guids(self, rating_key: str, user_token: str) -> list[str]:
         try:

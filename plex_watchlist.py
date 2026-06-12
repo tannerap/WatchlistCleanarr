@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 
 import requests
 from plexapi.server import PlexServer
@@ -72,11 +73,8 @@ class PlexWatchlistService:
         imdb_id: str | None = None,
         title: str | None = None,
     ) -> int:
-        if not tmdb_id and not imdb_id:
-            logger.warning(
-                "Skipping watchlist cleanup for '%s': no TMDB or IMDb ID in webhook payload",
-                title or "unknown movie",
-            )
+        if not tmdb_id and not imdb_id and not title:
+            logger.warning("Skipping watchlist cleanup: no TMDB, IMDb ID or title in webhook payload")
             return 0
 
         return self._remove_from_all_watchlists(
@@ -94,9 +92,9 @@ class PlexWatchlistService:
         imdb_id: str | None = None,
         title: str | None = None,
     ) -> int:
-        if not tvdb_id and not tmdb_id and not imdb_id:
+        if not tvdb_id and not tmdb_id and not imdb_id and not title:
             logger.warning(
-                "Skipping watchlist cleanup for '%s': no TVDB, TMDB or IMDb ID in webhook payload",
+                "Skipping watchlist cleanup for '%s': no TVDB, TMDB, IMDb ID or title in webhook payload",
                 title or "unknown series",
             )
             return 0
@@ -170,14 +168,11 @@ class PlexWatchlistService:
                 tvdb_id=tvdb_id,
                 tmdb_id=tmdb_id,
                 imdb_id=imdb_id,
+                title=title,
             )
         ]
         if not matches:
-            logger.info(
-                "No watchlist match for '%s' (user: %s)",
-                title,
-                user.name,
-            )
+            _log_no_match(user.name, title, watchlist)
             return 0
 
         removed = 0
@@ -200,12 +195,35 @@ class PlexWatchlistService:
         return removed
 
 
+def _normalize_title(value: str) -> str:
+    without_year = re.sub(r"\s*[\(\[]\d{4}[\)\]]\s*", "", value)
+    return re.sub(r"[^a-z0-9]", "", without_year.lower())
+
+
+def _log_no_match(user_name: str, title: str, watchlist: list[WatchlistItem]) -> None:
+    if not watchlist:
+        logger.info("No watchlist match for '%s' (user: %s): watchlist is empty", title, user_name)
+        return
+
+    preview = ", ".join(
+        f"{item.title} [{'; '.join(item.guids) or 'no guids'}]" for item in watchlist[:8]
+    )
+    logger.info(
+        "No watchlist match for '%s' (user: %s, %d items: %s)",
+        title,
+        user_name,
+        len(watchlist),
+        preview,
+    )
+
+
 def _item_matches(
     item: WatchlistItem,
     *,
     tvdb_id: int | None = None,
     tmdb_id: int | None = None,
     imdb_id: str | None = None,
+    title: str | None = None,
 ) -> bool:
     guids = set(item.guids)
 
@@ -214,7 +232,7 @@ def _item_matches(
         tvdb_variants = {f"tvdb://{tvdb_id_str}", f"thetvdb://{tvdb_id_str}"}
         if guids.intersection(tvdb_variants):
             return True
-        if any(guid.endswith(f"/{tvdb_id_str}") for guid in guids):
+        if any(tvdb_id_str in guid for guid in guids):
             return True
 
     if tmdb_id is not None:
@@ -222,7 +240,7 @@ def _item_matches(
         tmdb_variants = {f"tmdb://{tmdb_id_str}", f"themoviedb://{tmdb_id_str}"}
         if guids.intersection(tmdb_variants):
             return True
-        if any(guid.endswith(f"/{tmdb_id_str}") for guid in guids):
+        if any(tmdb_id_str in guid for guid in guids):
             return True
 
     if imdb_id:
@@ -232,6 +250,12 @@ def _item_matches(
             f"imdb://{normalized.lstrip('tt')}",
         }
         if guids.intersection(imdb_variants):
+            return True
+        if any(normalized in guid for guid in guids):
+            return True
+
+    if title and item.title:
+        if _normalize_title(item.title) == _normalize_title(title):
             return True
 
     return False
