@@ -128,16 +128,16 @@ class PlexWatchlistService:
         return self._refresh_server_users()
 
     def resolve_user(self, identifier: str) -> ServerUser | None:
-        """Match a Plex user by display name, username, or numeric user ID."""
-        lookup = PlexApiClient._name_lookup_keys(identifier)
-        if identifier.isdigit():
-            lookup.add(identifier)
-
-        for user in self.list_server_users():
-            user_keys = PlexApiClient._name_lookup_keys(user.name, str(user.user_id))
-            if lookup.intersection(user_keys):
-                return user
-        return None
+        """Match one Plex user and prepare write access without touching other accounts."""
+        users = self._client.discover_server_users(
+            self._get_machine_id(),
+            resolve_home_tokens_for=set(),
+            apply_friend_uuids=False,
+        )
+        matched = _match_user_identifier(users, identifier)
+        if matched is None:
+            return None
+        return self._client.prepare_user_for_watchlist_write(matched)
 
     def clear_user_watchlist(
         self,
@@ -146,11 +146,13 @@ class PlexWatchlistService:
         movies: bool = True,
         shows: bool = True,
         dry_run: bool = False,
+        user: ServerUser | None = None,
     ) -> tuple[int, int]:
         """Remove all watchlist items for one user. Returns (movies_removed, shows_removed)."""
-        user = self.resolve_user(user_identifier)
-        if user is None:
+        resolved = user or self.resolve_user(user_identifier)
+        if resolved is None:
             raise ValueError(f"No Plex user matched '{user_identifier}'")
+        user = resolved
 
         movies_removed = 0
         shows_removed = 0
@@ -397,6 +399,18 @@ class PlexWatchlistService:
                     user_name,
                 )
         return removed
+
+
+def _match_user_identifier(users: list[ServerUser], identifier: str) -> ServerUser | None:
+    lookup = PlexApiClient._name_lookup_keys(identifier)
+    if identifier.isdigit():
+        lookup.add(identifier)
+
+    for user in users:
+        user_keys = PlexApiClient._name_lookup_keys(user.name, str(user.user_id))
+        if lookup.intersection(user_keys):
+            return user
+    return None
 
 
 def _normalize_title(value: str) -> str:

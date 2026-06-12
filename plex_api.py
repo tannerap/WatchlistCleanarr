@@ -117,7 +117,13 @@ class PlexApiClient:
             raise ValueError("Plex server response did not include machineIdentifier")
         return machine_id
 
-    def discover_server_users(self, machine_id: str) -> list[ServerUser]:
+    def discover_server_users(
+        self,
+        machine_id: str,
+        *,
+        resolve_home_tokens_for: set[int] | None = None,
+        apply_friend_uuids: bool = True,
+    ) -> list[ServerUser]:
         users: dict[int, ServerUser] = {}
         admin_id: int | None = None
 
@@ -180,9 +186,17 @@ class PlexApiClient:
                 source="shared",
             )
 
-        self._apply_friend_uuids(users, api_user_details)
+        if apply_friend_uuids:
+            self._apply_friend_uuids(users, api_user_details)
         self._apply_user_tokens(users, api_user_details)
-        self._resolve_home_user_tokens(users, home_users)
+        if resolve_home_tokens_for is None:
+            self._resolve_home_user_tokens(users, home_users)
+        elif resolve_home_tokens_for:
+            self._resolve_home_user_tokens(
+                users,
+                home_users,
+                only_user_ids=resolve_home_tokens_for,
+            )
         return list(users.values())
 
     def _get_home_users(self) -> list[dict[str, Any]]:
@@ -222,9 +236,12 @@ class PlexApiClient:
         self,
         users: dict[int, ServerUser],
         home_users: list[dict[str, Any]],
+        only_user_ids: set[int] | None = None,
     ) -> None:
         """Cache Plex Home user tokens for watchlist writes (independent of GraphQL UUID)."""
         for user_id in self._home_user_ids:
+            if only_user_ids is not None and user_id not in only_user_ids:
+                continue
             user = users.get(user_id)
             if user is None or user.source != "home" or user.token:
                 continue
@@ -662,6 +679,25 @@ class PlexApiClient:
 
     def _is_home_user(self, user: ServerUser) -> bool:
         return user.source == "home" or user.user_id in self._home_user_ids
+
+    def prepare_user_for_watchlist_write(self, user: ServerUser) -> ServerUser:
+        """Resolve tokens for a single user without touching other accounts."""
+        if user.source == "shared":
+            users = {user.user_id: user}
+            self._apply_user_tokens(users, self._get_api_user_details())
+            return users[user.user_id]
+
+        if self._is_home_user(user) and not user.token:
+            token = self._switch_home_user_token(user.user_id, self.home_user_pin, user.name)
+            if token:
+                return ServerUser(
+                    user_id=user.user_id,
+                    name=user.name,
+                    uuid=user.uuid,
+                    token=token,
+                    source=user.source,
+                )
+        return user
 
     def _myplex_account_from_token(self, token: str) -> MyPlexAccount:
         return MyPlexAccount(token=token, timeout=self.timeout)
