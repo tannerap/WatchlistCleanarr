@@ -129,43 +129,76 @@ class PlexApiClient:
         return list(users.values())
 
     def _get_home_users(self, home_user_pin: str | None = None) -> list[dict[str, Any]]:
-        from plexapi.exceptions import PlexApiException
-        from plexapi.myplex import MyPlexAccount
-
         results: list[dict[str, Any]] = []
         try:
-            account = MyPlexAccount(token=self.token)
-            for home_user in account.homeUsers():
-                name = home_user.title or home_user.username or str(home_user.id)
+            response = self._session.get(
+                f"{PLEX_TV_BASE}/api/home/users",
+                headers={**self._default_headers(), "Accept": "application/xml"},
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            root = ET.fromstring(response.content)
+
+            for user_elem in root.iter("User"):
+                user_id_raw = user_elem.attrib.get("id")
+                if not user_id_raw:
+                    continue
+
+                user_id = int(user_id_raw)
+                name = (
+                    user_elem.attrib.get("title")
+                    or user_elem.attrib.get("username")
+                    or str(user_id)
+                )
                 entry: dict[str, Any] = {
-                    "id": int(home_user.id),
+                    "id": user_id,
                     "name": name,
-                    "uuid": getattr(home_user, "uuid", None),
-                    "token": None,
+                    "uuid": user_elem.attrib.get("uuid"),
+                    "token": self._switch_home_user_token(user_id, home_user_pin, name),
                 }
-                try:
-                    if home_user_pin:
-                        switched = account.switchHomeUser(home_user, pin=home_user_pin)
-                    else:
-                        switched = account.switchHomeUser(home_user)
-                    entry["token"] = switched.token
-                except PlexApiException as exc:
-                    if "pin" in str(exc).lower():
-                        logger.warning(
-                            "Plex Home user '%s' requires a PIN. "
-                            "Set PLEX_HOME_USER_PIN in docker-compose.yml.",
-                            name,
-                        )
-                    else:
-                        logger.warning(
-                            "Could not switch to Plex Home user '%s': %s",
-                            name,
-                            exc,
-                        )
                 results.append(entry)
         except Exception as exc:
             logger.error("Failed to list Plex Home users: %s", exc)
         return results
+
+    def _switch_home_user_token(
+        self,
+        user_id: int,
+        home_user_pin: str | None,
+        name: str,
+    ) -> str | None:
+        try:
+            params: dict[str, str] = {}
+            if home_user_pin:
+                params["pin"] = home_user_pin
+            response = self._session.post(
+                f"{PLEX_TV_BASE}/api/home/users/{user_id}/switch",
+                params=params,
+                headers={**self._default_headers(), "Accept": "application/xml"},
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            root = ET.fromstring(response.content)
+            token = root.attrib.get("authenticationToken")
+            if not token:
+                for elem in root.iter("User"):
+                    token = elem.attrib.get("authenticationToken")
+                    if token:
+                        break
+            return token
+        except requests.HTTPError as exc:
+            if exc.response is not None and exc.response.status_code in (401, 403):
+                logger.warning(
+                    "Plex Home user '%s' requires a PIN or cannot be switched. "
+                    "Set PLEX_HOME_USER_PIN if needed.",
+                    name,
+                )
+            else:
+                logger.warning("Could not switch to Plex Home user '%s': %s", name, exc)
+            return None
+        except Exception as exc:
+            logger.warning("Could not switch to Plex Home user '%s': %s", name, exc)
+            return None
 
     def _get_api_user_names(self) -> dict[int, str]:
         names: dict[int, str] = {}
