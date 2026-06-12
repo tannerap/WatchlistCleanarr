@@ -1,94 +1,68 @@
-"""Plex watchlist operations using the administrator token."""
+"""Plex watchlist cleanup for all users on a media server."""
 
 from __future__ import annotations
 
 import logging
 import os
-from typing import Iterator
 
 import requests
-from plexapi.exceptions import BadRequest, PlexApiException
-from plexapi.myplex import MyPlexAccount, MyPlexUser
 from plexapi.server import PlexServer
+
+from plex_api import PlexApiClient, ServerUser, WatchlistMovie
 
 logger = logging.getLogger(__name__)
 
-WATCHLIST_PAGE_SIZE = 200
 DELETE_EVENT_TYPES = {"MovieDelete", "MovieDeleted"}
 
 
 class PlexWatchlistService:
-    """Remove movies from all Plex Home user watchlists via the admin token."""
+    """Remove movies from every Plex user watchlist on the configured server."""
 
     def __init__(self, plex_token: str, plex_url: str, home_user_pin: str | None = None) -> None:
         self.plex_token = plex_token
         self.plex_url = plex_url.rstrip("/")
         self.home_user_pin = home_user_pin
-        self._admin_account: MyPlexAccount | None = None
+        self._client = PlexApiClient(plex_token, home_user_pin=home_user_pin)
+        self._machine_id: str | None = None
 
     def verify_connection(self) -> None:
-        """Validate Plex server and account access on startup."""
         try:
             PlexServer(self.plex_url, self.plex_token, timeout=10)
-            logger.info("Plex server reachable at %s", self.plex_url)
+            self._machine_id = self._client.get_machine_identifier(self.plex_url)
+            logger.info(
+                "Plex server reachable at %s (machineId=%s)",
+                self.plex_url,
+                self._machine_id,
+            )
         except Exception as exc:
             logger.warning("Could not reach Plex server at %s: %s", self.plex_url, exc)
 
         try:
-            account = self._get_admin_account()
+            account = self._client.get_account()
             logger.info(
                 "Plex account authenticated as %s",
-                account.title or account.username,
+                account.get("title") or account.get("username"),
             )
+            self._client.ping_token()
         except Exception as exc:
             logger.error("Plex account authentication failed: %s", exc)
 
-    def _get_admin_account(self) -> MyPlexAccount:
-        if self._admin_account is None:
-            self._admin_account = MyPlexAccount(token=self.plex_token)
-        return self._admin_account
-
-    def iter_user_accounts(self) -> Iterator[tuple[str, MyPlexAccount]]:
-        """Yield (username, account) for the admin and all Plex Home users."""
-        admin = self._get_admin_account()
-        admin_name = admin.title or admin.username or "admin"
-        yield admin_name, admin
-
         try:
-            home_users = admin.homeUsers()
-        except PlexApiException as exc:
-            logger.error("Failed to list Plex Home users: %s", exc)
-            return
+            users = self._get_server_users()
+            logger.info("Found %d Plex user(s) with access to this server", len(users))
+            for user in users:
+                token_status = "token ok" if user.token else "no token"
+                logger.info("  - %s (%s, %s)", user.name, user.source, token_status)
+        except Exception as exc:
+            logger.error("Failed to enumerate Plex server users: %s", exc)
 
-        for home_user in home_users:
-            name = home_user.title or home_user.username or str(home_user.id)
-            try:
-                user_account = self._switch_to_home_user(admin, home_user, name)
-                if user_account is not None:
-                    yield name, user_account
-            except Exception as exc:
-                logger.error("Could not switch to Plex Home user '%s': %s", name, exc)
+    def _get_machine_id(self) -> str:
+        if self._machine_id is None:
+            self._machine_id = self._client.get_machine_identifier(self.plex_url)
+        return self._machine_id
 
-    def _switch_to_home_user(
-        self,
-        admin: MyPlexAccount,
-        home_user: MyPlexUser,
-        name: str,
-    ) -> MyPlexAccount | None:
-        try:
-            if self.home_user_pin:
-                return admin.switchHomeUser(home_user, pin=self.home_user_pin)
-            return admin.switchHomeUser(home_user)
-        except PlexApiException as exc:
-            if "pin" in str(exc).lower():
-                logger.warning(
-                    "Plex Home user '%s' requires a PIN. "
-                    "Set PLEX_HOME_USER_PIN in docker-compose.yml if needed.",
-                    name,
-                )
-            else:
-                logger.error("Failed to switch to Plex Home user '%s': %s", name, exc)
-            return None
+    def _get_server_users(self) -> list[ServerUser]:
+        return self._client.discover_server_users(self._get_machine_id())
 
     def remove_movie_from_all_watchlists(
         self,
@@ -97,7 +71,6 @@ class PlexWatchlistService:
         imdb_id: str | None = None,
         title: str | None = None,
     ) -> int:
-        """Remove a movie from every user watchlist. Returns number of removals."""
         if not tmdb_id and not imdb_id:
             logger.warning(
                 "Skipping watchlist cleanup for '%s': no TMDB or IMDb ID in webhook payload",
@@ -106,11 +79,10 @@ class PlexWatchlistService:
             return 0
 
         removed_count = 0
-        for user_name, account in self.iter_user_accounts():
+        for user in self._get_server_users():
             try:
                 removed_count += self._remove_from_user_watchlist(
-                    account,
-                    user_name,
+                    user,
                     tmdb_id=tmdb_id,
                     imdb_id=imdb_id,
                     title=title,
@@ -118,7 +90,7 @@ class PlexWatchlistService:
             except Exception as exc:
                 logger.error(
                     "Unexpected error while processing watchlist for '%s': %s",
-                    user_name,
+                    user.name,
                     exc,
                     exc_info=True,
                 )
@@ -126,78 +98,66 @@ class PlexWatchlistService:
 
     def _remove_from_user_watchlist(
         self,
-        account: MyPlexAccount,
-        user_name: str,
+        user: ServerUser,
         *,
         tmdb_id: int | None,
         imdb_id: str | None,
         title: str | None,
     ) -> int:
-        watchlist_items = self._fetch_watchlist(account, user_name)
-        matches = [
-            item
-            for item in watchlist_items
-            if item.type == "movie" and _movie_matches(item, tmdb_id=tmdb_id, imdb_id=imdb_id)
-        ]
+        if not user.token:
+            logger.warning(
+                "Skipping user '%s' (%s): no usable Plex token",
+                user.name,
+                user.source,
+            )
+            return 0
 
+        try:
+            watchlist = self._client.fetch_watchlist_movies(user.token)
+        except requests.RequestException as exc:
+            logger.error("Failed to fetch watchlist for '%s': %s", user.name, exc)
+            return 0
+
+        matches = [
+            movie
+            for movie in watchlist
+            if _movie_matches(movie, tmdb_id=tmdb_id, imdb_id=imdb_id)
+        ]
         if not matches:
             logger.info(
                 "No watchlist match for '%s' (user: %s)",
                 title or "movie",
-                user_name,
+                user.name,
             )
             return 0
 
         removed = 0
-        for item in matches:
+        for movie in matches:
             try:
-                account.removeFromWatchlist(item)
-                removed += 1
-                logger.info(
-                    "Removed '%s' from %s's watchlist",
-                    getattr(item, "title", title or "movie"),
-                    user_name,
-                )
-            except BadRequest as exc:
-                logger.warning(
-                    "Could not remove '%s' from %s's watchlist: %s",
-                    getattr(item, "title", title or "movie"),
-                    user_name,
-                    exc,
-                )
-            except PlexApiException as exc:
-                logger.error(
-                    "Plex API error removing '%s' from %s's watchlist: %s",
-                    getattr(item, "title", title or "movie"),
-                    user_name,
-                    exc,
-                )
+                if self._client.remove_from_watchlist(user.token, movie.rating_key):
+                    removed += 1
+                    logger.info(
+                        "Removed '%s' from %s's watchlist",
+                        movie.title or title or "movie",
+                        user.name,
+                    )
             except requests.RequestException as exc:
                 logger.error(
                     "Network error removing '%s' from %s's watchlist: %s",
-                    getattr(item, "title", title or "movie"),
-                    user_name,
+                    movie.title or title or "movie",
+                    user.name,
                     exc,
                 )
         return removed
 
-    def _fetch_watchlist(self, account: MyPlexAccount, user_name: str) -> list:
-        try:
-            return account.watchlist(libtype="movie")
-        except PlexApiException as exc:
-            logger.error("Failed to fetch watchlist for '%s': %s", user_name, exc)
-            return []
-        except requests.RequestException as exc:
-            logger.error(
-                "Network error fetching watchlist for '%s': %s",
-                user_name,
-                exc,
-            )
-            return []
 
-
-def _movie_matches(item, *, tmdb_id: int | None, imdb_id: str | None) -> bool:
-    guids = _extract_guids(item)
+def _movie_matches(
+    movie: WatchlistMovie,
+    *,
+    tmdb_id: int | None,
+    imdb_id: str | None,
+) -> bool:
+    guids = set(movie.guids)
 
     if tmdb_id is not None:
         tmdb_id_str = str(tmdb_id)
@@ -220,18 +180,6 @@ def _movie_matches(item, *, tmdb_id: int | None, imdb_id: str | None) -> bool:
             return True
 
     return False
-
-
-def _extract_guids(item) -> set[str]:
-    guids: set[str] = set()
-    if getattr(item, "guid", None):
-        guids.add(item.guid)
-
-    for guid_obj in getattr(item, "guids", []) or []:
-        guid_value = getattr(guid_obj, "id", None) or str(guid_obj)
-        guids.add(guid_value)
-
-    return guids
 
 
 def create_service_from_env() -> PlexWatchlistService:
