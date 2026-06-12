@@ -269,6 +269,26 @@ Can be triggered manually via **Actions → Docker Build and Publish → Run wor
 - The container does **not** exit on errors
 - Missing user tokens or unreachable watchlists are skipped and logged
 
+## Clear a user's watchlist (CLI)
+
+To wipe the full Plex watchlist for one user (manual cleanup):
+
+```bash
+# List users and whether their watchlist can be modified
+docker compose exec watchlist-cleanarr python clear_watchlist.py --list-users
+
+# Preview how many items would be removed
+docker compose exec watchlist-cleanarr python clear_watchlist.py micha.65
+
+# Actually delete (movies + shows)
+docker compose exec watchlist-cleanarr python clear_watchlist.py micha.65 --yes
+
+# Movies only, preview in logs without deleting
+docker compose exec watchlist-cleanarr python clear_watchlist.py noemi.92 --movies-only --dry-run
+```
+
+The user argument matches Plex **username**, **display name**, or numeric **user ID** (same as `user_tokens.env`). Shared friends need their token configured for write access.
+
 ## Local Development
 
 ```bash
@@ -277,4 +297,5 @@ source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env   # adjust values
 python app.py
+python clear_watchlist.py --list-users
 ```
