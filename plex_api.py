@@ -69,10 +69,12 @@ class PlexApiClient:
         token: str,
         timeout: int = 30,
         home_user_pin: str | None = None,
+        user_tokens: dict[str, str] | None = None,
     ) -> None:
         self.token = token
         self.timeout = timeout
         self.home_user_pin = home_user_pin
+        self.user_tokens = user_tokens or {}
         self._home_user_token_cache: dict[int, str] = {}
         self._home_user_ids: set[int] = set()
         self._admin_account: MyPlexAccount | None = None
@@ -179,6 +181,7 @@ class PlexApiClient:
             )
 
         self._apply_friend_uuids(users, api_user_details)
+        self._apply_user_tokens(users, api_user_details)
         self._resolve_home_user_tokens(users, home_users)
         return list(users.values())
 
@@ -356,6 +359,54 @@ class PlexApiClient:
             keys.add(lowered)
             keys.add(lowered.replace(".", "").replace("_", "").replace("-", ""))
         return keys
+
+    def _build_user_token_lookup(self) -> dict[str, str]:
+        lookup: dict[str, str] = {}
+        for key, token in self.user_tokens.items():
+            if not token:
+                continue
+            for lookup_key in self._name_lookup_keys(key):
+                lookup[lookup_key] = token
+            if key.isdigit():
+                lookup[key] = token
+        return lookup
+
+    def _apply_user_tokens(
+        self,
+        users: dict[int, ServerUser],
+        api_user_details: dict[int, dict[str, str]],
+    ) -> None:
+        if not self.user_tokens:
+            return
+
+        token_by_key = self._build_user_token_lookup()
+        for user_id, user in list(users.items()):
+            if user.source != "shared":
+                continue
+
+            details = api_user_details.get(user_id, {})
+            names_to_try = self._name_lookup_keys(
+                user.name,
+                str(user.user_id),
+                details.get("title"),
+                details.get("username"),
+                details.get("email", "").split("@")[0] if details.get("email") else None,
+            )
+
+            matched_token = None
+            for name in names_to_try:
+                if name in token_by_key:
+                    matched_token = token_by_key[name]
+                    break
+
+            if matched_token:
+                users[user_id] = ServerUser(
+                    user_id=user.user_id,
+                    name=user.name,
+                    uuid=user.uuid,
+                    token=matched_token,
+                    source=user.source,
+                )
 
     def _apply_friend_uuids(
         self,
@@ -635,6 +686,9 @@ class PlexApiClient:
                     user.user_id,
                 )
                 return None
+
+            if user.source == "shared" and user.token:
+                return self._myplex_account_from_token(user.token)
 
             # Library shares use their own Plex accounts; server accessToken is not
             # valid for discover.provider.plex.tv / MyPlexAccount.

@@ -58,6 +58,7 @@ Or use `docker compose` (see below) — set environment variables on the first s
 | `PLEX_URL` | Yes | Plex URL, e.g. `http://plex:32400` (Docker DNS) |
 | `PLEX_TOKEN` | Yes* | Administrator X-Plex-Token (*first start in compose only) |
 | `PLEX_HOME_USER_PIN` | No | Optional fallback PIN for a **single** PIN-protected Plex Home profile (not one PIN per user) |
+| `PLEX_USER_TOKENS` | No | Optional JSON map of Plex username → Plex.tv token for friends with library shares (see below) |
 | `WEBHOOK_API_KEY` | Recommended | API key to protect webhook endpoints |
 | `CONFIG_DIR` | No | Path for persistent config (default: `/data`) |
 | `WEBHOOK_PORT` | No | Host port for Docker mapping (default: `8788`) |
@@ -103,6 +104,33 @@ networks:
 > **Docker DNS:** `PLEX_URL` must be reachable from inside the container — typically `http://<plex-service-name>:32400` on the shared Docker network, not `localhost`.
 
 For local development without Docker: create a `.env` file (see `.env.example`).
+
+### Per-user Plex tokens (library-share friends)
+
+Friends with their **own Plex account** and a library share cannot be cleaned with the admin `PLEX_TOKEN` alone. Each of them needs their own **Plex.tv X-Plex-Token** so WatchlistCleanarr can call `MyPlexAccount` on their behalf.
+
+Configure tokens in either place:
+
+1. **File (recommended):** `/data/user_tokens.env` on the config volume  
+2. **Environment:** `PLEX_USER_TOKENS` as JSON on first start (persisted to the file automatically)
+
+```bash
+# /data/user_tokens.env
+micha.65=their-plex-token-here
+noemi.92=their-plex-token-here
+```
+
+Keys can be the Plex **username**, **display name**, or numeric **user ID** (case-insensitive). Each person finds their token the same way as the admin (Plex web app → View XML → copy `X-Plex-Token` from the URL).
+
+```yaml
+# docker-compose.yml (first start only)
+environment:
+  PLEX_USER_TOKENS: '{"micha.65":"token-a","noemi.92":"token-b"}'
+```
+
+After the first start you can edit `/data/user_tokens.env` directly and restart — no need to keep tokens in compose.
+
+> This is a **Plex.tv token**, not the Radarr/Sonarr `WEBHOOK_API_KEY`. The webhook key only protects incoming delete events.
 
 ## Finding Your X-Plex-Token
 
@@ -197,11 +225,11 @@ Check WatchlistCleanarr logs after an action:
 | --- | --- | --- |
 | Administrator | Plex account of the token owner | `MyPlexAccount(token=admin)` |
 | Plex Home (managed profile) | `/api/home/users` | `admin.switchHomeUser(profile)` via python-plexapi |
-| Own Plex account with library share | `/api/servers/{id}/shared_servers` | Read-only via GraphQL (removal requires that user's own Plex login) |
+| Own Plex account with library share | `/api/servers/{id}/shared_servers` | GraphQL read-only, or read+write when their token is in `user_tokens.env` / `PLEX_USER_TOKENS` |
 
 Watchlist removal uses the same **python-plexapi** flow as other community tools: `account.watchlist()` to load items and `account.removeFromWatchlist(item)` to remove them.
 
-> **One `PLEX_TOKEN` is enough** for the admin account and **Plex Home profiles** (managed users). Friends with their own Plex account and a library share can be read via GraphQL but **cannot** be cleaned automatically — same limitation as other community tools that need per-user login for external accounts. `PLEX_HOME_USER_PIN` is only needed when a Plex Home profile has its own PIN.
+> **One `PLEX_TOKEN` is enough** for the admin account and **Plex Home profiles** (managed users). Friends with their own Plex account need an entry in `user_tokens.env` (or `PLEX_USER_TOKENS`) with **their** Plex.tv token. `PLEX_HOME_USER_PIN` is only needed when a Plex Home profile has its own PIN.
 >
 > **Important for shared users:** They must be friends with the admin, and watchlist visibility must be set to **Friends** or **Anyone** (Plex → Settings → Account → Privacy).
 
