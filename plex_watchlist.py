@@ -15,6 +15,9 @@ from plex_api import PlexApiClient, ServerUser, WatchlistItem
 logger = logging.getLogger(__name__)
 
 RADARR_DELETE_EVENTS = {"MovieDelete", "MovieDeleted"}
+RADARR_FILE_DELETE_EVENTS = {"MovieFileDelete", "MovieFileDeleted"}
+RADARR_WATCHLIST_CLEANUP_EVENTS = RADARR_DELETE_EVENTS | RADARR_FILE_DELETE_EVENTS
+RADARR_FILE_DELETE_SKIP_REASONS = {"upgrade"}
 SONARR_DELETE_EVENTS = {"SeriesDelete", "SeriesDeleted"}
 SERVER_USERS_CACHE_TTL_SEC = 24 * 60 * 60
 

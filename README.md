@@ -155,8 +155,12 @@ Wenn `WEBHOOK_API_KEY` gesetzt ist, müssen alle Webhook-Requests den Key mitsen
 1. Radarr → **Einstellungen** → **Connect** → **+** → **Webhook**
 2. **Name:** `WatchlistCleanarr`
 3. **URL:** `http://<host>:5000/webhook/radarr?apikey=DEIN_KEY`
-4. **Trigger:** **On Delete** aktivieren
+4. **Trigger** aktivieren:
+   - **On Delete** — wenn der Film komplett aus Radarr entfernt wird
+   - **On Movie File Delete** — wenn du **Unmonitor and Delete Files** nutzt (Film bleibt in Radarr, Datei wird gelöscht)
 5. Speichern
+
+> **Hinweis:** Bei Upgrades (bessere Qualität) wird `MovieFileDelete` absichtlich ignoriert, damit die Watchlist nicht bereinigt wird.
 
 ## Sonarr-Webhook einrichten
 
@@ -191,7 +195,7 @@ Unterstützte Events:
 
 | Quelle | Events |
 | --- | --- |
-| Radarr | `MovieDelete`, `MovieDeleted` |
+| Radarr | `MovieDelete`, `MovieDeleted`, `MovieFileDelete`, `MovieFileDeleted` |
 | Sonarr | `SeriesDelete`, `SeriesDeleted` |
 
 ## CI/CD: Docker-Image bauen und veröffentlichen

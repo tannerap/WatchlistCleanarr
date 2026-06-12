@@ -12,7 +12,9 @@ from flask import Flask, request
 from auth import get_expected_api_key, is_authorized
 from config_store import init_config
 from plex_watchlist import (
-    RADARR_DELETE_EVENTS,
+    RADARR_FILE_DELETE_EVENTS,
+    RADARR_FILE_DELETE_SKIP_REASONS,
+    RADARR_WATCHLIST_CLEANUP_EVENTS,
     SONARR_DELETE_EVENTS,
     PlexWatchlistService,
     create_service_from_env,
@@ -75,8 +77,17 @@ def radarr_webhook() -> tuple[dict, int]:
     event_type = payload.get("eventType", "")
     logger.info("Received Radarr webhook: eventType=%s", event_type)
 
-    if event_type not in RADARR_DELETE_EVENTS:
+    if event_type not in RADARR_WATCHLIST_CLEANUP_EVENTS:
         return {"status": "ignored", "eventType": event_type}, 200
+
+    if event_type in RADARR_FILE_DELETE_EVENTS:
+        delete_reason = str(payload.get("deleteReason", "")).lower()
+        if delete_reason in RADARR_FILE_DELETE_SKIP_REASONS:
+            logger.info(
+                "Ignoring Radarr movie file delete (reason=%s): not a manual removal",
+                payload.get("deleteReason"),
+            )
+            return {"status": "ignored", "eventType": event_type, "reason": delete_reason}, 200
 
     movie = payload.get("movie") or {}
     tmdb_id = _parse_int(movie.get("tmdbId"))
