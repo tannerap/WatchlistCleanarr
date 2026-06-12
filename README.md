@@ -27,7 +27,7 @@ WatchlistCleanarr
         │     • Plex Home users (local/managed)
         │     • External users with a library share (own Plex account)
         │
-        ├─► Per user: load watchlist (Discover API)
+        ├─► Per user: load watchlist via python-plexapi
         │
         └─► Find and remove the title by TMDB/IMDb/TVDB ID
 ```
