@@ -230,9 +230,11 @@ class PlexWatchlistService:
             return 0
 
         logger.warning(
-            "Found '%s' on %s's watchlist but cannot remove it: Plex Home switch or a "
-            "user-specific Plex.tv token is required (shared server tokens are read-only)",
+            "Found '%s' on %s's watchlist but cannot remove it: %s has their own Plex "
+            "account (library share). Only the admin and Plex Home profiles can be cleaned "
+            "automatically with PLEX_TOKEN.",
             title,
+            user.name,
             user.name,
         )
         return 0

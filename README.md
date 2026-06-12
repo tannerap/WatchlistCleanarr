@@ -197,11 +197,11 @@ Check WatchlistCleanarr logs after an action:
 | --- | --- | --- |
 | Administrator | Plex account of the token owner | `MyPlexAccount(token=admin)` |
 | Plex Home (managed profile) | `/api/home/users` | `admin.switchHomeUser(profile)` via python-plexapi |
-| Own Plex account with library share | `/api/servers/{id}/shared_servers` | `MyPlexAccount(token=accessToken)` when Plex accepts it for Discover; otherwise read-only via GraphQL |
+| Own Plex account with library share | `/api/servers/{id}/shared_servers` | Read-only via GraphQL (removal requires that user's own Plex login) |
 
 Watchlist removal uses the same **python-plexapi** flow as other community tools: `account.watchlist()` to load items and `account.removeFromWatchlist(item)` to remove them.
 
-> **One `PLEX_TOKEN` is enough** for the admin account and Plex Home profiles. `PLEX_HOME_USER_PIN` is only needed when a specific Plex Home profile has its own PIN. Shared friends whose server `accessToken` cannot modify Discover watchlists are detected as read-only at startup.
+> **One `PLEX_TOKEN` is enough** for the admin account and **Plex Home profiles** (managed users). Friends with their own Plex account and a library share can be read via GraphQL but **cannot** be cleaned automatically — same limitation as other community tools that need per-user login for external accounts. `PLEX_HOME_USER_PIN` is only needed when a Plex Home profile has its own PIN.
 >
 > **Important for shared users:** They must be friends with the admin, and watchlist visibility must be set to **Friends** or **Anyone** (Plex → Settings → Account → Privacy).
 
