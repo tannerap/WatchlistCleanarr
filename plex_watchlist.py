@@ -123,6 +123,99 @@ class PlexWatchlistService:
 
         return self._refresh_server_users()
 
+    def list_server_users(self) -> list[ServerUser]:
+        """Return all Plex users with access to the configured server."""
+        return self._refresh_server_users()
+
+    def resolve_user(self, identifier: str) -> ServerUser | None:
+        """Match a Plex user by display name, username, or numeric user ID."""
+        lookup = PlexApiClient._name_lookup_keys(identifier)
+        if identifier.isdigit():
+            lookup.add(identifier)
+
+        for user in self.list_server_users():
+            user_keys = PlexApiClient._name_lookup_keys(user.name, str(user.user_id))
+            if lookup.intersection(user_keys):
+                return user
+        return None
+
+    def clear_user_watchlist(
+        self,
+        user_identifier: str,
+        *,
+        movies: bool = True,
+        shows: bool = True,
+        dry_run: bool = False,
+    ) -> tuple[int, int]:
+        """Remove all watchlist items for one user. Returns (movies_removed, shows_removed)."""
+        user = self.resolve_user(user_identifier)
+        if user is None:
+            raise ValueError(f"No Plex user matched '{user_identifier}'")
+
+        movies_removed = 0
+        shows_removed = 0
+        if movies:
+            movies_removed = self._clear_user_watchlist_libtype(user, "movie", dry_run=dry_run)
+        if shows:
+            shows_removed = self._clear_user_watchlist_libtype(user, "show", dry_run=dry_run)
+        return movies_removed, shows_removed
+
+    def _clear_user_watchlist_libtype(
+        self,
+        user: ServerUser,
+        libtype: str,
+        *,
+        dry_run: bool,
+    ) -> int:
+        account = self._client.get_myplex_account(user)
+        if account is None:
+            raise ValueError(
+                f"Cannot modify {libtype} watchlist for '{user.name}' ({user.source}): "
+                f"no Plex account write access. For shared users, add their Plex.tv token to "
+                f"{os.environ.get('CONFIG_DIR', '/data')}/user_tokens.env"
+            )
+
+        try:
+            plex_items = self._client.fetch_plexapi_watchlist(account, libtype)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to fetch {libtype} watchlist for '{user.name}': {exc}"
+            ) from exc
+
+        if not plex_items:
+            logger.info("No %s watchlist items for '%s'", libtype, user.name)
+            return 0
+
+        removed = 0
+        for item in plex_items:
+            title = getattr(item, "title", "unknown") or "unknown"
+            if dry_run:
+                logger.info(
+                    "Would remove %s '%s' from %s's watchlist",
+                    libtype,
+                    title,
+                    user.name,
+                )
+                removed += 1
+                continue
+
+            if self._client.remove_plexapi_watchlist_item(account, item):
+                removed += 1
+                logger.info(
+                    "Removed %s '%s' from %s's watchlist",
+                    libtype,
+                    title,
+                    user.name,
+                )
+            else:
+                logger.warning(
+                    "Could not remove %s '%s' from %s's watchlist",
+                    libtype,
+                    title,
+                    user.name,
+                )
+        return removed
+
     def remove_movie_from_all_watchlists(
         self,
         *,

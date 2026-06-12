@@ -11,7 +11,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && pip install --no-cache-dir -r requirements.txt
 
-COPY app.py auth.py background_tasks.py config_store.py plex_api.py plex_watchlist.py webhook_payload.py ./
+COPY app.py auth.py background_tasks.py clear_watchlist.py config_store.py plex_api.py plex_watchlist.py webhook_payload.py ./
 
 RUN mkdir -p /data && chmod 700 /data
 
