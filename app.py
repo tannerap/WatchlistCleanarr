@@ -15,7 +15,9 @@ from plex_watchlist import (
     RADARR_FILE_DELETE_EVENTS,
     RADARR_FILE_DELETE_SKIP_REASONS,
     RADARR_WATCHLIST_CLEANUP_EVENTS,
-    SONARR_DELETE_EVENTS,
+    SONARR_FILE_DELETE_EVENTS,
+    SONARR_FILE_DELETE_SKIP_REASONS,
+    SONARR_WATCHLIST_CLEANUP_EVENTS,
     PlexWatchlistService,
     create_service_from_env,
 )
@@ -136,8 +138,17 @@ def sonarr_webhook() -> tuple[dict, int]:
     event_type = payload.get("eventType", "")
     logger.info("Received Sonarr webhook: eventType=%s", event_type)
 
-    if event_type not in SONARR_DELETE_EVENTS:
+    if event_type not in SONARR_WATCHLIST_CLEANUP_EVENTS:
         return {"status": "ignored", "eventType": event_type}, 200
+
+    if event_type in SONARR_FILE_DELETE_EVENTS:
+        delete_reason = str(payload.get("deleteReason", "")).lower()
+        if delete_reason in SONARR_FILE_DELETE_SKIP_REASONS:
+            logger.info(
+                "Ignoring Sonarr episode file delete (reason=%s): not a manual removal",
+                payload.get("deleteReason"),
+            )
+            return {"status": "ignored", "eventType": event_type, "reason": delete_reason}, 200
 
     series = payload.get("series") or {}
     tvdb_id = _parse_int(series.get("tvdbId"))
@@ -150,8 +161,14 @@ def sonarr_webhook() -> tuple[dict, int]:
     if series.get("tmdbId") is not None and tmdb_id is None:
         logger.warning("Invalid tmdbId in Sonarr payload: %s", series.get("tmdbId"))
 
+    action = (
+        "episode file deletion"
+        if event_type in SONARR_FILE_DELETE_EVENTS
+        else "series deletion"
+    )
     logger.info(
-        "Processing series deletion: title=%s tvdbId=%s tmdbId=%s imdbId=%s",
+        "Processing %s: title=%s tvdbId=%s tmdbId=%s imdbId=%s",
+        action,
         title,
         tvdb_id,
         tmdb_id,

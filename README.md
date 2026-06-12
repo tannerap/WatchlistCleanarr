@@ -167,8 +167,12 @@ Wenn `WEBHOOK_API_KEY` gesetzt ist, müssen alle Webhook-Requests den Key mitsen
 1. Sonarr → **Einstellungen** → **Connect** → **+** → **Webhook**
 2. **Name:** `WatchlistCleanarr`
 3. **URL:** `http://<host>:5000/webhook/sonarr?apikey=DEIN_KEY`
-4. **Trigger:** **On Series Delete** aktivieren
+4. **Trigger** aktivieren:
+   - **On Series Delete** — wenn die Serie komplett aus Sonarr entfernt wird
+   - **On Episode File Delete** — wenn du **Unmonitor show + seasons, delete all episodes** nutzt (Serie bleibt in Sonarr, Episoden werden gelöscht)
 5. Speichern
+
+> **Hinweis:** Bei Upgrades (bessere Qualität) wird `EpisodeFileDelete` absichtlich ignoriert. Aktiviere **On Episode File Delete**, nicht **On Episode File Delete For Upgrade**.
 
 **Docker-Netzwerk:** Laufen *arr und WatchlistCleanarr im selben Compose-Netzwerk, kann die URL `http://watchlist-cleanarr:5000/webhook/radarr?apikey=...` lauten.
 
@@ -196,7 +200,7 @@ Unterstützte Events:
 | Quelle | Events |
 | --- | --- |
 | Radarr | `MovieDelete`, `MovieDeleted`, `MovieFileDelete`, `MovieFileDeleted` |
-| Sonarr | `SeriesDelete`, `SeriesDeleted` |
+| Sonarr | `SeriesDelete`, `SeriesDeleted`, `EpisodeFileDelete`, `EpisodeFileDeleted` |
 
 ## CI/CD: Docker-Image bauen und veröffentlichen
 
