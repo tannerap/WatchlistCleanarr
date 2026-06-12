@@ -72,12 +72,10 @@ class PlexWatchlistService:
             users = self._refresh_server_users()
             logger.info("Found %d Plex user(s) with access to this server", len(users))
             for user in users:
-                if user.source == "admin":
-                    access = "admin (read+write)"
-                elif user.token:
-                    access = "token (read+write)"
+                if self._client.get_myplex_account(user) is not None:
+                    access = "plexapi (read+write)"
                 elif user.uuid:
-                    access = "uuid (read-only; needs token for removal)"
+                    access = "graphql (read-only)"
                 else:
                     access = "no access"
                 logger.info("  - %s (%s, %s)", user.name, user.source, access)
@@ -190,9 +188,21 @@ class PlexWatchlistService:
         imdb_id: str | None,
         title: str,
     ) -> int:
-        if not user.uuid and not user.token:
+        account = self._client.get_myplex_account(user)
+        if account is not None:
+            return self._remove_via_plexapi(
+                account,
+                user.name,
+                libtype=libtype,
+                tvdb_id=tvdb_id,
+                tmdb_id=tmdb_id,
+                imdb_id=imdb_id,
+                title=title,
+            )
+
+        if not user.uuid:
             logger.warning(
-                "Skipping user '%s' (%s): no UUID or Plex.tv token for watchlist access",
+                "Skipping user '%s' (%s): no Plex account access for watchlist changes",
                 user.name,
                 user.source,
             )
@@ -219,28 +229,63 @@ class PlexWatchlistService:
             _log_no_match(user.name, title, watchlist)
             return 0
 
+        logger.warning(
+            "Found '%s' on %s's watchlist but cannot remove it: Plex Home switch or a "
+            "user-specific Plex.tv token is required (shared server tokens are read-only)",
+            title,
+            user.name,
+        )
+        return 0
+
+    def _remove_via_plexapi(
+        self,
+        account,
+        user_name: str,
+        *,
+        libtype: str,
+        tvdb_id: int | None,
+        tmdb_id: int | None,
+        imdb_id: str | None,
+        title: str,
+    ) -> int:
+        try:
+            plex_items = self._client.fetch_plexapi_watchlist(account, libtype)
+        except Exception as exc:
+            logger.error("Failed to fetch watchlist for '%s' via plexapi: %s", user_name, exc)
+            return 0
+
+        watchlist = [
+            self._client.watchlist_item_from_plexapi(item, libtype) for item in plex_items
+        ]
+        matches = [
+            (plex_item, watchlist_item)
+            for plex_item, watchlist_item in zip(plex_items, watchlist)
+            if _item_matches(
+                watchlist_item,
+                tvdb_id=tvdb_id,
+                tmdb_id=tmdb_id,
+                imdb_id=imdb_id,
+                title=title,
+            )
+        ]
+        if not matches:
+            _log_no_match(user_name, title, watchlist)
+            return 0
+
         removed = 0
-        for item in matches:
-            try:
-                if self._client.remove_from_watchlist(user, item, libtype):
-                    removed += 1
-                    logger.info(
-                        "Removed '%s' from %s's watchlist",
-                        item.title or title,
-                        user.name,
-                    )
-                else:
-                    logger.warning(
-                        "Could not remove '%s' from %s's watchlist",
-                        item.title or title,
-                        user.name,
-                    )
-            except requests.RequestException as exc:
-                logger.error(
-                    "Network error removing '%s' from %s's watchlist: %s",
-                    item.title or title,
-                    user.name,
-                    exc,
+        for plex_item, watchlist_item in matches:
+            if self._client.remove_plexapi_watchlist_item(account, plex_item):
+                removed += 1
+                logger.info(
+                    "Removed '%s' from %s's watchlist",
+                    watchlist_item.title or title,
+                    user_name,
+                )
+            else:
+                logger.warning(
+                    "Could not remove '%s' from %s's watchlist",
+                    watchlist_item.title or title,
+                    user_name,
                 )
         return removed
 

@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from typing import Any
 
 import requests
+from plexapi.exceptions import BadRequest
+from plexapi.myplex import MyPlexAccount
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +74,7 @@ class PlexApiClient:
         self.timeout = timeout
         self.home_user_pin = home_user_pin
         self._home_user_token_cache: dict[int, str] = {}
+        self._admin_account: MyPlexAccount | None = None
         self._session = requests.Session()
         self._session.headers.update(self._default_headers())
 
@@ -588,141 +591,101 @@ class PlexApiClient:
                 guids.append(guid_value)
         return guids
 
-    def ensure_user_token(self, user: ServerUser) -> ServerUser:
-        """Obtain a user-specific Plex.tv token for watchlist writes."""
-        if user.token:
-            return user
-        if user.source == "admin":
-            return ServerUser(
-                user_id=user.user_id,
-                name=user.name,
-                uuid=user.uuid,
-                token=self.token,
-                source=user.source,
-            )
-        if user.source == "home":
-            token = self._switch_home_user_token(user.user_id, self.home_user_pin, user.name)
-            if token:
-                return ServerUser(
-                    user_id=user.user_id,
-                    name=user.name,
-                    uuid=user.uuid,
-                    token=token,
-                    source=user.source,
-                )
-        return user
+    def _get_admin_account(self) -> MyPlexAccount:
+        if self._admin_account is None:
+            self._admin_account = MyPlexAccount(token=self.token, timeout=self.timeout)
+        return self._admin_account
 
     @staticmethod
-    def _rating_keys_for_removal(item: WatchlistItem) -> list[str]:
-        """Rating keys accepted by discover.provider.plex.tv removeFromWatchlist."""
-        keys: list[str] = []
-        if item.rating_key:
-            keys.append(item.rating_key)
-        for guid in item.guids:
-            if "/" not in guid:
+    def _home_user_lookup_keys(name: str) -> set[str]:
+        lowered = name.lower().strip()
+        return {lowered, lowered.replace(".", "").replace("_", "").replace("-", "")}
+
+    def _find_home_plex_user(self, admin: MyPlexAccount, user: ServerUser):
+        lookup = self._home_user_lookup_keys(user.name)
+        for home_user in admin.users():
+            if not home_user.home:
                 continue
-            suffix = guid.rsplit("/", 1)[-1]
-            if suffix and suffix not in keys:
-                keys.append(suffix)
-        return keys
+            candidates = {
+                (home_user.title or "").lower().strip(),
+                (getattr(home_user, "username", None) or "").lower().strip(),
+            }
+            candidates.discard("")
+            normalized = {c.replace(".", "").replace("_", "").replace("-", "") for c in candidates}
+            if lookup.intersection(candidates | normalized):
+                return home_user
+            if int(getattr(home_user, "id", -1)) == user.user_id:
+                return home_user
+        return None
 
-    def remove_from_watchlist(self, user: ServerUser, item: WatchlistItem, libtype: str) -> bool:
-        user = self.ensure_user_token(user)
-        if user.source != "admin" and not user.token:
-            if user.source == "home":
-                logger.warning(
-                    "Cannot remove '%s' from %s's watchlist: could not obtain a Plex Home "
-                    "user token with the admin account. PIN-protected profiles must either have "
-                    "their PIN removed in Plex or match PLEX_HOME_USER_PIN.",
-                    item.title,
-                    user.name,
-                )
-            else:
-                logger.warning(
-                    "Cannot remove '%s' from %s's watchlist: no Plex token for this shared user. "
-                    "Ensure they still have library access on this server.",
-                    item.title,
-                    user.name,
-                )
-            return False
-
-        token = user.token or self.token
-        rating_keys = self._rating_keys_for_removal(item)
-        if not rating_keys:
-            logger.warning(
-                "Cannot remove '%s' from %s's watchlist: no rating key available",
-                item.title,
-                user.name,
-            )
-            return False
-
-        for rating_key in rating_keys:
-            if not self._remove_from_watchlist_rest(token, rating_key):
-                continue
-            if self._verify_removed_from_watchlist(user, item, libtype):
-                return True
-            logger.debug(
-                "removeFromWatchlist returned 200 but '%s' is still on %s's watchlist "
-                "(ratingKey=%s)",
-                item.title,
-                user.name,
-                rating_key,
-            )
-
-        logger.warning(
-            "Failed to remove '%s' from %s's watchlist (tried %d rating key(s))",
-            item.title,
-            user.name,
-            len(rating_keys),
-        )
-        return False
-
-    def _verify_removed_from_watchlist(
-        self,
-        user: ServerUser,
-        item: WatchlistItem,
-        libtype: str,
-    ) -> bool:
+    def get_myplex_account(self, user: ServerUser) -> MyPlexAccount | None:
+        """Return a MyPlexAccount that can read and modify the user's cloud watchlist."""
         try:
-            remaining = self.fetch_watchlist_items(user, libtype)
-        except requests.RequestException as exc:
-            logger.debug(
-                "Could not verify watchlist removal for '%s': %s",
-                user.name,
+            admin = self._get_admin_account()
+            if user.source == "admin":
+                return admin
+
+            if user.source == "home":
+                home_user = self._find_home_plex_user(admin, user)
+                target = home_user if home_user is not None else user.name
+                return admin.switchHomeUser(target, pin=self.home_user_pin)
+
+            if user.source == "shared" and user.token:
+                account = MyPlexAccount(token=user.token, timeout=self.timeout)
+                list(account.watchlist(libtype="movie", maxresults=1))
+                return account
+        except Exception as exc:
+            logger.warning("Could not open Plex account for '%s': %s", user.name, exc)
+            return None
+        return None
+
+    @staticmethod
+    def watchlist_item_from_plexapi(item: Any, libtype: str) -> WatchlistItem:
+        guids: list[str] = []
+        if getattr(item, "guid", None):
+            guids.append(item.guid)
+        for guid in getattr(item, "guids", []) or []:
+            guid_value = guid.id if hasattr(guid, "id") else str(guid)
+            if guid_value:
+                guids.append(guid_value)
+
+        rating_key = ""
+        if getattr(item, "guid", None) and "/" in item.guid:
+            rating_key = item.guid.rsplit("/", 1)[-1]
+        elif getattr(item, "ratingKey", None):
+            rating_key = str(item.ratingKey)
+
+        return WatchlistItem(
+            rating_key=rating_key,
+            title=getattr(item, "title", "unknown") or "unknown",
+            guids=tuple(dict.fromkeys(guids)),
+            item_type=libtype,
+        )
+
+    def fetch_plexapi_watchlist(self, account: MyPlexAccount, libtype: str) -> list[Any]:
+        return list(account.watchlist(libtype=libtype))
+
+    def remove_plexapi_watchlist_item(self, account: MyPlexAccount, item: Any) -> bool:
+        try:
+            account.removeFromWatchlist(item)
+            return True
+        except BadRequest as exc:
+            if "not on the watchlist" in str(exc).lower():
+                logger.info("'%s' was already removed from the watchlist", getattr(item, "title", item))
+                return True
+            logger.warning(
+                "Plex rejected watchlist removal for '%s': %s",
+                getattr(item, "title", item),
                 exc,
             )
             return False
-
-        removed_keys = set(self._rating_keys_for_removal(item))
-        removed_guids = set(item.guids)
-        for remaining_item in remaining:
-            if removed_keys.intersection(self._rating_keys_for_removal(remaining_item)):
-                return False
-            if removed_guids.intersection(remaining_item.guids):
-                return False
-        return True
-
-    def _remove_from_watchlist_rest(self, user_token: str, rating_key: str) -> bool:
-        response = self._session.put(
-            f"{DISCOVER_BASE}/actions/removeFromWatchlist",
-            params={"ratingKey": rating_key},
-            headers={
-                "Accept": "application/json",
-                "X-Plex-Token": user_token,
-                "X-Plex-Client-Identifier": CLIENT_IDENTIFIER,
-                "X-Plex-Product": "WatchlistCleanarr",
-            },
-            data={"ratingKey": rating_key},
-            timeout=self.timeout,
-        )
-        if response.status_code == 200:
-            return True
-        logger.debug(
-            "removeFromWatchlist failed for ratingKey=%s (status=%s)",
-            rating_key,
-            response.status_code,
-        )
-        return False
+        except Exception as exc:
+            logger.warning(
+                "Failed to remove '%s' from watchlist via plexapi: %s",
+                getattr(item, "title", item),
+                exc,
+            )
+            return False
 
     def ping_token(self) -> None:
         response = self._session.get(
