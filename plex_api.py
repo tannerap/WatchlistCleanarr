@@ -76,6 +76,7 @@ class PlexApiClient:
         self.home_user_pin = home_user_pin
         self.user_tokens = user_tokens or {}
         self._home_user_token_cache: dict[int, str] = {}
+        self._home_user_ids: set[int] = set()
         self._admin_account: MyPlexAccount | None = None
         self._session = requests.Session()
         self._session.headers.update(self._default_headers())
@@ -134,6 +135,7 @@ class PlexApiClient:
             logger.error("Failed to load Plex admin account: %s", exc)
 
         home_users = self._get_home_users()
+        self._home_user_ids = {home_user["id"] for home_user in home_users}
         for home_user in home_users:
             user_id = home_user["id"]
             if admin_id is not None and user_id == admin_id:
@@ -150,6 +152,18 @@ class PlexApiClient:
         for shared_user in self._get_shared_server_users(machine_id):
             user_id = shared_user["id"]
             if admin_id is not None and user_id == admin_id:
+                continue
+            if user_id in self._home_user_ids:
+                existing = users.get(user_id)
+                if existing is not None:
+                    details = api_user_details.get(user_id, {})
+                    users[user_id] = ServerUser(
+                        user_id=existing.user_id,
+                        name=existing.name,
+                        uuid=existing.uuid or details.get("uuid") or None,
+                        token=existing.token,
+                        source="home",
+                    )
                 continue
             details = api_user_details.get(user_id, {})
             name = (
@@ -209,11 +223,10 @@ class PlexApiClient:
         users: dict[int, ServerUser],
         home_users: list[dict[str, Any]],
     ) -> None:
-        """Switch into managed home users only when GraphQL UUID access is unavailable."""
-        home_user_ids = {home_user["id"] for home_user in home_users}
-        for user_id in home_user_ids:
+        """Cache Plex Home user tokens for watchlist writes (independent of GraphQL UUID)."""
+        for user_id in self._home_user_ids:
             user = users.get(user_id)
-            if user is None or user.uuid or user.token:
+            if user is None or user.source != "home" or user.token:
                 continue
             token = self._switch_home_user_token(user_id, self.home_user_pin, user.name)
             if token:
@@ -647,46 +660,42 @@ class PlexApiClient:
             self._admin_account = MyPlexAccount(token=self.token, timeout=self.timeout)
         return self._admin_account
 
-    @staticmethod
-    def _home_user_lookup_keys(name: str) -> set[str]:
-        lowered = name.lower().strip()
-        return {lowered, lowered.replace(".", "").replace("_", "").replace("-", "")}
+    def _is_home_user(self, user: ServerUser) -> bool:
+        return user.source == "home" or user.user_id in self._home_user_ids
 
-    def _find_home_plex_user(self, admin: MyPlexAccount, user: ServerUser):
-        lookup = self._home_user_lookup_keys(user.name)
-        for home_user in admin.users():
-            if not home_user.home:
-                continue
-            candidates = {
-                (home_user.title or "").lower().strip(),
-                (getattr(home_user, "username", None) or "").lower().strip(),
-            }
-            candidates.discard("")
-            normalized = {c.replace(".", "").replace("_", "").replace("-", "") for c in candidates}
-            if lookup.intersection(candidates | normalized):
-                return home_user
-            if int(getattr(home_user, "id", -1)) == user.user_id:
-                return home_user
-        return None
+    def _myplex_account_from_token(self, token: str) -> MyPlexAccount:
+        return MyPlexAccount(token=token, timeout=self.timeout)
 
     def get_myplex_account(self, user: ServerUser) -> MyPlexAccount | None:
         """Return a MyPlexAccount that can read and modify the user's cloud watchlist."""
         try:
-            admin = self._get_admin_account()
             if user.source == "admin":
-                return admin
+                return self._get_admin_account()
 
-            if user.source == "home":
-                home_user = self._find_home_plex_user(admin, user)
-                target = home_user if home_user is not None else user.name
-                return admin.switchHomeUser(target, pin=self.home_user_pin)
+            if self._is_home_user(user):
+                token = user.token or self._switch_home_user_token(
+                    user.user_id,
+                    self.home_user_pin,
+                    user.name,
+                )
+                if token:
+                    return self._myplex_account_from_token(token)
+                logger.warning(
+                    "Could not switch into Plex Home user '%s' (id=%s)",
+                    user.name,
+                    user.user_id,
+                )
+                return None
 
             if user.source == "shared" and user.token:
-                return MyPlexAccount(token=user.token, timeout=self.timeout)
+                return self._myplex_account_from_token(user.token)
+
+            # Library shares use their own Plex accounts; server accessToken is not
+            # valid for discover.provider.plex.tv / MyPlexAccount.
+            return None
         except Exception as exc:
             logger.warning("Could not open Plex account for '%s': %s", user.name, exc)
             return None
-        return None
 
     @staticmethod
     def watchlist_item_from_plexapi(item: Any, libtype: str) -> WatchlistItem:

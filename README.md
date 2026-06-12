@@ -229,7 +229,7 @@ Check WatchlistCleanarr logs after an action:
 
 Watchlist removal uses the same **python-plexapi** flow as other community tools: `account.watchlist()` to load items and `account.removeFromWatchlist(item)` to remove them.
 
-> **One `PLEX_TOKEN` is enough** for the admin account and Plex Home profiles. Friends with their own Plex account need an entry in `user_tokens.env` (or `PLEX_USER_TOKENS`) with **their** Plex.tv token. `PLEX_HOME_USER_PIN` is only needed when a Plex Home profile has its own PIN.
+> **One `PLEX_TOKEN` is enough** for the admin account and **Plex Home profiles** (managed users). Friends with their own Plex account need an entry in `user_tokens.env` (or `PLEX_USER_TOKENS`) with **their** Plex.tv token. `PLEX_HOME_USER_PIN` is only needed when a Plex Home profile has its own PIN.
 >
 > **Important for shared users:** They must be friends with the admin, and watchlist visibility must be set to **Friends** or **Anyone** (Plex → Settings → Account → Privacy).
 
