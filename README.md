@@ -129,8 +129,15 @@ docker compose logs -f watchlist-cleanarr
 ### Health-Check
 
 ```bash
-curl http://localhost:5000/health
-# {"status":"ok"}
+curl http://localhost:5000/ping
+# {"status":"pong"}
+```
+
+Der Container prüft sich selbst per Docker-Healthcheck (`GET /ping` alle 30 Sekunden). Status anzeigen:
+
+```bash
+docker compose ps
+docker inspect watchlist-cleanarr --format '{{.State.Health.Status}}'
 ```
 
 ## Webhook-Authentifizierung
@@ -175,7 +182,8 @@ Wenn `WEBHOOK_API_KEY` gesetzt ist, müssen alle Webhook-Requests den Key mitsen
 
 | Methode | Pfad | Beschreibung |
 | --- | --- | --- |
-| `GET` | `/health` | Health-Check (ohne API-Key) |
+| `GET` | `/ping` | Health-Check / Ping (ohne API-Key) |
+| `GET` | `/health` | Alias für `/ping` |
 | `POST` | `/webhook/radarr` | Radarr-Webhook (Filme) |
 | `POST` | `/webhook/sonarr` | Sonarr-Webhook (Serien) |
 

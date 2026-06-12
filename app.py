@@ -55,9 +55,10 @@ def _parse_int(value) -> int | None:
         return None
 
 
+@app.route("/ping", methods=["GET"])
 @app.route("/health", methods=["GET"])
-def health() -> tuple[dict, int]:
-    return {"status": "ok"}, 200
+def ping() -> tuple[dict, int]:
+    return {"status": "pong"}, 200
 
 
 @app.route("/webhook/radarr", methods=["POST"])
