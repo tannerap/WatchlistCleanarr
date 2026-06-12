@@ -156,7 +156,7 @@ class PlexApiClient:
                 source="shared",
             )
 
-        self._apply_friend_uuids(users)
+        self._apply_friend_uuids(users, api_user_details)
         return list(users.values())
 
     def _get_home_users(self, home_user_pin: str | None = None) -> list[dict[str, Any]]:
@@ -232,8 +232,8 @@ class PlexApiClient:
             logger.warning("Could not switch to Plex Home user '%s': %s", name, exc)
             return None
 
-    def _get_api_user_names(self) -> dict[int, str]:
-        names: dict[int, str] = {}
+    def _get_api_user_details(self) -> dict[int, dict[str, str]]:
+        details: dict[int, dict[str, str]] = {}
         try:
             response = self._session.get(
                 f"{PLEX_TV_BASE}/api/users",
@@ -244,14 +244,13 @@ class PlexApiClient:
             root = ET.fromstring(response.content)
             for user_elem in root.findall("User"):
                 user_id = int(user_elem.attrib["id"])
-                names[user_id] = (
-                    user_elem.attrib.get("title")
-                    or user_elem.attrib.get("username")
-                    or str(user_id)
-                )
+                details[user_id] = {
+                    "title": user_elem.attrib.get("title", ""),
+                    "username": user_elem.attrib.get("username", ""),
+                }
         except Exception as exc:
             logger.error("Failed to list Plex shared users: %s", exc)
-        return names
+        return details
 
     def _get_shared_server_users(self, machine_id: str) -> list[dict[str, Any]]:
         users: list[dict[str, Any]] = []
@@ -279,7 +278,11 @@ class PlexApiClient:
             )
         return users
 
-    def _apply_friend_uuids(self, users: dict[int, ServerUser]) -> None:
+    def _apply_friend_uuids(
+        self,
+        users: dict[int, ServerUser],
+        api_user_details: dict[int, dict[str, str]],
+    ) -> None:
         uuid_by_name: dict[str, str] = {}
         try:
             response = self._session.post(
@@ -316,7 +319,19 @@ class PlexApiClient:
         for user_id, user in list(users.items()):
             if user.uuid:
                 continue
-            matched_uuid = uuid_by_name.get(user.name.lower())
+            names_to_try = {user.name.lower()}
+            details = api_user_details.get(user_id, {})
+            for key in ("title", "username"):
+                value = details.get(key, "")
+                if value:
+                    names_to_try.add(value.lower())
+
+            matched_uuid = None
+            for name in names_to_try:
+                if name in uuid_by_name:
+                    matched_uuid = uuid_by_name[name]
+                    break
+
             if matched_uuid:
                 users[user_id] = ServerUser(
                     user_id=user.user_id,
