@@ -10,6 +10,7 @@ import time
 import requests
 from plexapi.server import PlexServer
 
+from config_store import load_user_tokens
 from plex_api import PlexApiClient, ServerUser, WatchlistItem
 
 logger = logging.getLogger(__name__)
@@ -38,11 +39,22 @@ SERVER_USERS_CACHE_TTL_SEC = 24 * 60 * 60
 class PlexWatchlistService:
     """Remove movies and shows from every Plex user watchlist on the configured server."""
 
-    def __init__(self, plex_token: str, plex_url: str, home_user_pin: str | None = None) -> None:
+    def __init__(
+        self,
+        plex_token: str,
+        plex_url: str,
+        home_user_pin: str | None = None,
+        user_tokens: dict[str, str] | None = None,
+    ) -> None:
         self.plex_token = plex_token
         self.plex_url = plex_url.rstrip("/")
         self.home_user_pin = home_user_pin
-        self._client = PlexApiClient(plex_token, home_user_pin=home_user_pin)
+        self.user_tokens = user_tokens or {}
+        self._client = PlexApiClient(
+            plex_token,
+            home_user_pin=home_user_pin,
+            user_tokens=self.user_tokens,
+        )
         self._machine_id: str | None = None
         self._server_users_cache: tuple[float, list[ServerUser]] | None = None
 
@@ -67,6 +79,9 @@ class PlexWatchlistService:
             self._client.ping_token()
         except Exception as exc:
             logger.error("Plex account authentication failed: %s", exc)
+
+        if self.user_tokens:
+            logger.info("Loaded %d per-user Plex token(s) from configuration", len(self.user_tokens))
 
         try:
             users = self._refresh_server_users()
@@ -230,10 +245,11 @@ class PlexWatchlistService:
             return 0
 
         logger.warning(
-            "Found '%s' on %s's watchlist but cannot remove it: Plex Home switch or a "
-            "user-specific Plex.tv token is required (shared server tokens are read-only)",
+            "Found '%s' on %s's watchlist but cannot remove it: add their Plex.tv token to "
+            "%s/user_tokens.env or set PLEX_USER_TOKENS",
             title,
             user.name,
+            os.environ.get("CONFIG_DIR", "/data"),
         )
         return 0
 
@@ -376,4 +392,5 @@ def create_service_from_env() -> PlexWatchlistService:
         plex_token=plex_token,
         plex_url=plex_url,
         home_user_pin=home_user_pin,
+        user_tokens=load_user_tokens(),
     )
