@@ -143,12 +143,24 @@ WatchlistCleanarr starting gunicorn on 0.0.0.0:8788
 Listening at: http://0.0.0.0:8788
 ```
 
-If you still see port `5000`, you are running an old image. Pull and recreate:
+If you still see port `5000`, you are running an old image. Try a fresh pull first:
 
 ```bash
 docker compose pull --ignore-buildable
 docker compose up -d --force-recreate
 ```
+
+If the log still shows `5000`, `force-recreate` is not enough — remove the container completely and start clean (your `/data` volume keeps `config.env`):
+
+```bash
+docker compose down
+docker rm -f watchlist-cleanarr 2>/dev/null || true
+docker rmi ghcr.io/tannerap/watchlistcleanarr:latest 2>/dev/null || true
+docker compose pull --ignore-buildable
+docker compose up -d
+```
+
+Then confirm the startup log shows port `8788` before changing Radarr/Sonarr webhook URLs.
 
 **Radarr/Sonarr webhook URL (same Docker network):** use the **container port**, not the host-mapped port from your browser. With the default config that is:
 
