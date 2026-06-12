@@ -15,7 +15,8 @@ logger = logging.getLogger(__name__)
 PLEX_TV_BASE = "https://plex.tv"
 DISCOVER_BASE = "https://discover.provider.plex.tv"
 COMMUNITY_GRAPHQL = "https://community.plex.tv/api"
-WATCHLIST_PAGE_SIZE = 200
+WATCHLIST_GRAPHQL_PAGE_SIZE = 100
+WATCHLIST_REST_PAGE_SIZE = 100
 CLIENT_IDENTIFIER = "watchlist-cleanarr"
 
 WATCHLIST_GRAPHQL = """
@@ -135,12 +136,18 @@ class PlexApiClient:
                 source="home",
             )
 
-        api_user_names = self._get_api_user_names()
+        api_user_details = self._get_api_user_details()
         for shared_user in self._get_shared_server_users(machine_id):
             user_id = shared_user["id"]
             if admin_id is not None and user_id == admin_id:
                 continue
-            name = api_user_names.get(user_id) or shared_user.get("name") or str(user_id)
+            details = api_user_details.get(user_id, {})
+            name = (
+                details.get("title")
+                or details.get("username")
+                or shared_user.get("name")
+                or str(user_id)
+            )
             users[user_id] = ServerUser(
                 user_id=user_id,
                 name=name,
@@ -149,7 +156,7 @@ class PlexApiClient:
                 source="shared",
             )
 
-        self._apply_friend_uuids(users)
+        self._apply_friend_uuids(users, api_user_details)
         return list(users.values())
 
     def _get_home_users(self, home_user_pin: str | None = None) -> list[dict[str, Any]]:
@@ -225,8 +232,8 @@ class PlexApiClient:
             logger.warning("Could not switch to Plex Home user '%s': %s", name, exc)
             return None
 
-    def _get_api_user_names(self) -> dict[int, str]:
-        names: dict[int, str] = {}
+    def _get_api_user_details(self) -> dict[int, dict[str, str]]:
+        details: dict[int, dict[str, str]] = {}
         try:
             response = self._session.get(
                 f"{PLEX_TV_BASE}/api/users",
@@ -237,14 +244,13 @@ class PlexApiClient:
             root = ET.fromstring(response.content)
             for user_elem in root.findall("User"):
                 user_id = int(user_elem.attrib["id"])
-                names[user_id] = (
-                    user_elem.attrib.get("title")
-                    or user_elem.attrib.get("username")
-                    or str(user_id)
-                )
+                details[user_id] = {
+                    "title": user_elem.attrib.get("title", ""),
+                    "username": user_elem.attrib.get("username", ""),
+                }
         except Exception as exc:
             logger.error("Failed to list Plex shared users: %s", exc)
-        return names
+        return details
 
     def _get_shared_server_users(self, machine_id: str) -> list[dict[str, Any]]:
         users: list[dict[str, Any]] = []
@@ -272,7 +278,11 @@ class PlexApiClient:
             )
         return users
 
-    def _apply_friend_uuids(self, users: dict[int, ServerUser]) -> None:
+    def _apply_friend_uuids(
+        self,
+        users: dict[int, ServerUser],
+        api_user_details: dict[int, dict[str, str]],
+    ) -> None:
         uuid_by_name: dict[str, str] = {}
         try:
             response = self._session.post(
@@ -309,7 +319,19 @@ class PlexApiClient:
         for user_id, user in list(users.items()):
             if user.uuid:
                 continue
-            matched_uuid = uuid_by_name.get(user.name.lower())
+            names_to_try = {user.name.lower()}
+            details = api_user_details.get(user_id, {})
+            for key in ("title", "username"):
+                value = details.get(key, "")
+                if value:
+                    names_to_try.add(value.lower())
+
+            matched_uuid = None
+            for name in names_to_try:
+                if name in uuid_by_name:
+                    matched_uuid = uuid_by_name[name]
+                    break
+
             if matched_uuid:
                 users[user_id] = ServerUser(
                     user_id=user.user_id,
@@ -327,28 +349,31 @@ class PlexApiClient:
                 )
 
     def fetch_watchlist_items(self, user: ServerUser, libtype: str) -> list[WatchlistItem]:
+        errors: list[str] = []
+
         if user.uuid:
             try:
                 return self._fetch_watchlist_graphql(user.uuid, libtype)
             except requests.RequestException as exc:
-                logger.warning(
-                    "GraphQL watchlist fetch failed for '%s': %s",
-                    user.name,
-                    exc,
-                )
+                message = f"GraphQL: {exc}"
+                errors.append(message)
+                logger.warning("Watchlist fetch via GraphQL failed for '%s': %s", user.name, exc)
 
         if user.token:
             try:
                 return self._fetch_watchlist_rest(user.token, libtype)
             except requests.RequestException as exc:
-                logger.warning(
-                    "REST watchlist fetch failed for '%s': %s",
-                    user.name,
-                    exc,
-                )
+                message = f"REST: {exc}"
+                errors.append(message)
+                logger.warning("Watchlist fetch via REST failed for '%s': %s", user.name, exc)
+
+        if not user.uuid and not user.token:
+            raise requests.RequestException(
+                f"No watchlist access for user '{user.name}' (missing uuid and token)"
+            )
 
         raise requests.RequestException(
-            f"No watchlist access for user '{user.name}' (missing uuid/token)"
+            f"Could not fetch watchlist for user '{user.name}': {'; '.join(errors)}"
         )
 
     def _fetch_watchlist_graphql(self, user_uuid: str, libtype: str) -> list[WatchlistItem]:
@@ -358,7 +383,7 @@ class PlexApiClient:
         while True:
             variables: dict[str, Any] = {
                 "uuid": user_uuid,
-                "first": WATCHLIST_PAGE_SIZE,
+                "first": WATCHLIST_GRAPHQL_PAGE_SIZE,
             }
             if after:
                 variables["after"] = after
@@ -413,13 +438,14 @@ class PlexApiClient:
             response = self._session.get(
                 f"{DISCOVER_BASE}/library/sections/watchlist/all",
                 params={
-                    "X-Plex-Token": user_token,
                     "X-Plex-Container-Start": start,
-                    "X-Plex-Container-Size": WATCHLIST_PAGE_SIZE,
+                    "X-Plex-Container-Size": WATCHLIST_REST_PAGE_SIZE,
                 },
                 headers={
                     "Accept": "application/json",
+                    "X-Plex-Token": user_token,
                     "X-Plex-Client-Identifier": CLIENT_IDENTIFIER,
+                    "X-Plex-Product": "WatchlistCleanarr",
                 },
                 timeout=self.timeout,
             )
@@ -452,10 +478,11 @@ class PlexApiClient:
         try:
             response = self._session.get(
                 f"{DISCOVER_BASE}/library/metadata/{rating_key}",
-                params={"X-Plex-Token": user_token},
                 headers={
                     "Accept": "application/json",
+                    "X-Plex-Token": user_token,
                     "X-Plex-Client-Identifier": CLIENT_IDENTIFIER,
+                    "X-Plex-Product": "WatchlistCleanarr",
                 },
                 timeout=self.timeout,
             )
@@ -493,10 +520,12 @@ class PlexApiClient:
     def _remove_from_watchlist_rest(self, user_token: str, rating_key: str) -> bool:
         response = self._session.put(
             f"{DISCOVER_BASE}/actions/removeFromWatchlist",
-            params={"ratingKey": rating_key, "X-Plex-Token": user_token},
+            params={"ratingKey": rating_key},
             headers={
-                "X-Plex-Client-Identifier": CLIENT_IDENTIFIER,
                 "Accept": "application/json",
+                "X-Plex-Token": user_token,
+                "X-Plex-Client-Identifier": CLIENT_IDENTIFIER,
+                "X-Plex-Product": "WatchlistCleanarr",
             },
             data={"ratingKey": rating_key},
             timeout=self.timeout,
